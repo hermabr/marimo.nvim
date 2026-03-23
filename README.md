@@ -1,6 +1,8 @@
 # marimo.nvim
 
-Neovim support for working with marimo notebooks as projected `# +` buffers.
+> This is pre-alpha. Expect breaking changes
+
+Neovim support for working with marimo notebooks.
 
 ## Install
 
@@ -9,8 +11,6 @@ With `lazy.nvim`:
 ```lua
 {
   "hermabr/marimo.nvim",
-  main = "marimo",
-  opts = {},
 }
 ```
 
