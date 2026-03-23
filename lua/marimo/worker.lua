@@ -7,18 +7,19 @@ local next_request_id = 0
 local function find_project_root(path)
 	local absolute = vim.fn.fnamemodify(path, ":p")
 	local dirpath = vim.fn.fnamemodify(absolute, ":h")
+	local fallback = dirpath
 	local previous = nil
 	while dirpath ~= previous and dirpath ~= "" do
 		if vim.uv.fs_stat(dirpath .. "/uv.lock") then
-			return dirpath
+			return dirpath, true
 		end
 		if vim.uv.fs_stat(dirpath .. "/pyproject.toml") then
-			return dirpath
+			return dirpath, true
 		end
 		previous = dirpath
 		dirpath = vim.fn.fnamemodify(dirpath, ":h")
 	end
-	return vim.fn.fnamemodify(absolute, ":h")
+	return fallback, false
 end
 
 local function worker_script_path()
@@ -26,111 +27,115 @@ local function worker_script_path()
 	return root .. "/python/marimo_nvim_worker.py"
 end
 
-local function launch_spec(project_root)
+local function launch_spec(path)
+	local project_root, has_project = find_project_root(path)
 	local script = worker_script_path()
-	local specs = {
-		{ runtime_kind = "uv_project", cmd = { "uv", "run", "--project", project_root, "python", script } },
-		{ runtime_kind = "uv_with_marimo", cmd = { "uv", "run", "--with", "marimo", "python", script } },
-		{ runtime_kind = "python", cmd = { "python3", script } },
+	local cmd = { "uv", "run" }
+	local runtime_kind = "uv"
+	if has_project then
+		vim.list_extend(cmd, { "--project", project_root })
+		runtime_kind = "uv_project"
+	end
+	vim.list_extend(cmd, { "--with", "marimo", "python", script })
+	return {
+		project_root = project_root,
+		runtime_kind = runtime_kind,
+		cmd = cmd,
 	}
-	return specs
 end
 
-local function ensure_worker(project_root)
+local function ensure_worker(path)
+	local spec = launch_spec(path)
+	local project_root = spec.project_root
 	local existing = workers[project_root]
 	if existing and existing.job_id and vim.fn.jobwait({ existing.job_id }, 0)[1] == -1 then
 		return existing
 	end
 
-	local specs = launch_spec(project_root)
 	local last_error = nil
+	local worker = {
+		project_root = project_root,
+		pending = {},
+		stdout_buffer = "",
+		runtime_kind = spec.runtime_kind,
+	}
 
-	for _, spec in ipairs(specs) do
-		local worker = {
-			project_root = project_root,
-			pending = {},
-			stdout_buffer = "",
-			runtime_kind = spec.runtime_kind,
-		}
-
-		worker.job_id = vim.fn.jobstart(spec.cmd, {
-			stdout_buffered = false,
-			stderr_buffered = true,
-			on_stdout = function(_, data)
-				if not data or #data == 0 then
-					return
-				end
-				worker.stdout_buffer = worker.stdout_buffer .. (data[1] or "")
-				if #data == 1 then
-					return
-				end
-
-				local ok, decoded = pcall(vim.json.decode, worker.stdout_buffer)
-				if ok and decoded and decoded.id ~= nil then
-					local pending = worker.pending[decoded.id]
-					if pending then
-						pending.response = decoded
-					end
-				elseif worker.stdout_buffer ~= "" then
-					last_error = "failed to decode marimo worker response: " .. worker.stdout_buffer
-				end
-
-				for idx = 2, #data - 1 do
-					local line = data[idx]
-					if line ~= "" then
-						local line_ok, line_decoded = pcall(vim.json.decode, line)
-						if line_ok and line_decoded and line_decoded.id ~= nil then
-							local pending = worker.pending[line_decoded.id]
-							if pending then
-								pending.response = line_decoded
-							end
-						else
-							last_error = "failed to decode marimo worker response: " .. line
-						end
-					end
-				end
-
-				worker.stdout_buffer = data[#data] or ""
-			end,
-			on_stderr = function(_, data)
-				if not data then
-					return
-				end
-				local stderr = table.concat(data, "\n")
-				if stderr:gsub("%s+", "") ~= "" then
-					last_error = stderr
-				end
-			end,
-			on_exit = function()
-				workers[project_root] = nil
-			end,
-		})
-
-		if worker.job_id > 0 then
-			local status = vim.fn.jobwait({ worker.job_id }, 100)[1]
-			if status == -1 then
-				workers[project_root] = worker
-				return worker
+	worker.job_id = vim.fn.jobstart(spec.cmd, {
+		stdout_buffered = false,
+		stderr_buffered = true,
+		on_stdout = function(_, data)
+			if not data or #data == 0 then
+				return
 			end
-			pcall(vim.fn.jobstop, worker.job_id)
-			last_error = last_error or ("failed to start worker with " .. table.concat(spec.cmd, " "))
-		else
-			last_error = last_error or ("failed to start worker with " .. table.concat(spec.cmd, " "))
-		end
-	end
+			worker.stdout_buffer = worker.stdout_buffer .. (data[1] or "")
+			if #data == 1 then
+				return
+			end
 
+			local ok, decoded = pcall(vim.json.decode, worker.stdout_buffer)
+			if ok and decoded and decoded.id ~= nil then
+				local pending = worker.pending[decoded.id]
+				if pending then
+					pending.response = decoded
+				end
+			elseif worker.stdout_buffer ~= "" then
+				last_error = "failed to decode marimo worker response: " .. worker.stdout_buffer
+			end
+
+			for idx = 2, #data - 1 do
+				local line = data[idx]
+				if line ~= "" then
+					local line_ok, line_decoded = pcall(vim.json.decode, line)
+					if line_ok and line_decoded and line_decoded.id ~= nil then
+						local pending = worker.pending[line_decoded.id]
+						if pending then
+							pending.response = line_decoded
+						end
+					else
+						last_error = "failed to decode marimo worker response: " .. line
+					end
+				end
+			end
+
+			worker.stdout_buffer = data[#data] or ""
+		end,
+		on_stderr = function(_, data)
+			if not data then
+				return
+			end
+			local stderr = table.concat(data, "\n")
+			if stderr:gsub("%s+", "") ~= "" then
+				last_error = stderr
+			end
+		end,
+		on_exit = function()
+			workers[project_root] = nil
+		end,
+	})
+
+	if worker.job_id > 0 then
+		local status = vim.fn.jobwait({ worker.job_id }, 100)[1]
+		if status == -1 then
+			workers[project_root] = worker
+			return worker
+		end
+		pcall(vim.fn.jobstop, worker.job_id)
+		last_error = last_error or ("failed to start worker with " .. table.concat(spec.cmd, " "))
+	else
+		last_error = last_error or ("failed to start worker with " .. table.concat(spec.cmd, " "))
+	end
 	error(last_error or "failed to start marimo worker")
 end
 
 function M.resolve_runtime(path)
 	local project_root = find_project_root(path)
-	local worker = ensure_worker(project_root)
+	local worker = ensure_worker(path)
 	return project_root, worker.runtime_kind
 end
 
 function M.request(path, method, params)
 	local project_root = find_project_root(path)
-	local worker = ensure_worker(project_root)
+	local worker = ensure_worker(path)
 	next_request_id = next_request_id + 1
 	local request_id = next_request_id
 	local payload = {
