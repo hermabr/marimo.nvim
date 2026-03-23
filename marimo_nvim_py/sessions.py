@@ -149,6 +149,24 @@ class Worker:
         parsed_cells = dedupe_empty_cells(parse_projected_cells(lines))
         return self._reconcile_ids(previous, parsed_cells)
 
+    def _from_manual_python(self, content: str) -> list[dict[str, Any]]:
+        lines = content.splitlines()
+        top_level_markers = any(line.startswith("# +") for line in lines)
+        if top_level_markers:
+            promoted, changed = promote_first_marker_to_marimo(lines)
+            if not changed:
+                raise ValueError("failed to promote projected markers to marimo cells")
+            return self._from_projection(promoted, None)
+        return [
+            {
+                "id": uuid.uuid4().hex,
+                "name": "_",
+                "code": content,
+                "options": {},
+                "editor_status": "clean",
+            }
+        ]
+
     def _session_payload(self, session: Session) -> dict[str, Any]:
         return {
             "session_id": session.session_id,
@@ -174,6 +192,10 @@ class Worker:
         runtime_kind = params.get("runtime_kind") or "python"
         if input_kind == "raw_marimo":
             header, app_options, cells = self._from_raw_notebook(path, content)
+        elif input_kind == "manual_python":
+            header = None
+            app_options = {}
+            cells = self._from_manual_python(content)
         else:
             lines = content.splitlines()
             if input_kind == "generic_projected_promotable":

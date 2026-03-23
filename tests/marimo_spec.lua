@@ -70,6 +70,13 @@ local GENERIC_PROJECTED = [[
 x = 1
 ]]
 
+local PLAIN_PYTHON = [[
+x = 1
+
+y = x + 1
+print(y)
+]]
+
 local function test_find_project_root_prefers_uv_lock()
 	local root = make_path("project")
 	local nested = root .. "/nested"
@@ -100,6 +107,8 @@ local function test_activate_projected_notebook_and_write_raw_marimo_file()
 	write_file(path, PROJECTED_NOTEBOOK)
 	edit(path)
 
+	assert_truthy(not vim.b.marimo_projected)
+	vim.cmd("Marimo on")
 	assert_eq(vim.api.nvim_buf_get_lines(0, 0, 1, false)[1], "# + {marimo}")
 	vim.cmd("write")
 
@@ -114,8 +123,24 @@ local function test_generic_projected_notebook_is_promoted()
 	write_file(path, GENERIC_PROJECTED)
 	edit(path)
 
+	assert_truthy(not vim.b.marimo_projected)
+	vim.cmd("Marimo on")
 	assert_eq(vim.api.nvim_buf_get_lines(0, 0, 1, false)[1], "# + {marimo}")
 	assert_truthy(vim.b.marimo_session_id)
+end
+
+local function test_manual_activation_wraps_plain_python_in_one_cell()
+	local path = make_path("plain_python.py")
+	write_file(path, PLAIN_PYTHON)
+	edit(path)
+
+	assert_truthy(not vim.b.marimo_projected)
+	vim.cmd("Marimo on")
+	local lines = vim.api.nvim_buf_get_lines(0, 0, -1, false)
+	assert_eq(lines[1], "# + {marimo}")
+	assert_eq(lines[3], "x = 1")
+	assert_matches(table.concat(lines, "\n"), "print%(y%)")
+	assert_eq(#vim.b.marimo_cells, 1)
 end
 
 marimo.setup()
@@ -125,6 +150,7 @@ local tests = {
 	test_activate_raw_notebook_projects_and_populates_session_state,
 	test_activate_projected_notebook_and_write_raw_marimo_file,
 	test_generic_projected_notebook_is_promoted,
+	test_manual_activation_wraps_plain_python_in_one_cell,
 }
 
 for _, test in ipairs(tests) do

@@ -159,7 +159,14 @@ function M.activate(bufnr, opts)
 	end
 
 	if markers.has_any_projected_markers(lines) then
-		if open_with_worker(bufnr, "generic_projected_promotable", opts) then
+		if opts.manual and open_with_worker(bufnr, "generic_projected_promotable", opts) then
+			util.echo("activated marimo for " .. vim.fn.fnamemodify(vim.api.nvim_buf_get_name(bufnr), ":~:."))
+		end
+		return
+	end
+
+	if opts.manual then
+		if open_with_worker(bufnr, "manual_python", opts) then
 			util.echo("activated marimo for " .. vim.fn.fnamemodify(vim.api.nvim_buf_get_name(bufnr), ":~:."))
 		end
 		return
