@@ -1,4 +1,4 @@
-local marimo = require("hermabr.marimo_nvim")
+local marimo = require("marimo")
 local private = marimo._private
 
 local function assert_eq(actual, expected, message)
