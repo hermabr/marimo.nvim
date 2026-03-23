@@ -21,8 +21,8 @@ function M.setup(opts)
 			if markers.looks_like_marimo(lines) then
 				api.project_buffer(args.buf, { ensure_write_autocmd = opts.ensure_write_autocmd })
 				util.echo("activated marimo for " .. vim.fn.fnamemodify(vim.api.nvim_buf_get_name(args.buf), ":~:."))
-			elseif markers.looks_like_projected(lines) then
-				state.mark_projected(args.buf, opts.ensure_write_autocmd)
+			elseif markers.looks_like_projected(lines) or markers.has_any_projected_markers(lines) then
+				api.activate(args.buf, { ensure_write_autocmd = opts.ensure_write_autocmd })
 				util.echo("activated marimo for " .. vim.fn.fnamemodify(vim.api.nvim_buf_get_name(args.buf), ":~:."))
 			end
 		end,
