@@ -62,7 +62,7 @@ local function ensure_worker(project_root)
 				end
 				for _, chunk in ipairs(data) do
 					if chunk ~= "" then
-						worker.stdout_buffer = worker.stdout_buffer .. chunk .. "\n"
+						worker.stdout_buffer = worker.stdout_buffer .. chunk
 					end
 				end
 				while true do
