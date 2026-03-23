@@ -65,7 +65,7 @@ function M.project_buffer(bufnr, opts)
 	vim.b[bufnr].marimo_header = parsed.header
 	vim.b[bufnr].marimo_app_options = util.as_json_object(parsed.app_options or {})
 	vim.bo[bufnr].modified = false
-	opts.ensure_write_autocmd(bufnr)
+	opts.ensure_projected_buffer_setup(bufnr)
 end
 
 function M.write_buffer(bufnr)
@@ -130,7 +130,7 @@ function M.activate(bufnr, opts)
 	if markers.looks_like_projected(lines) then
 		local normalized_lines = markers.normalize_projected_buffer_lines(lines)
 		vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, normalized_lines)
-		state.mark_projected(bufnr, opts.ensure_write_autocmd)
+		state.mark_projected(bufnr, opts.ensure_projected_buffer_setup)
 		util.echo("activated marimo for " .. vim.fn.fnamemodify(vim.api.nvim_buf_get_name(bufnr), ":~:."))
 		return
 	end
@@ -144,7 +144,7 @@ function M.activate(bufnr, opts)
 		if changed then
 			local normalized_lines = markers.normalize_projected_buffer_lines(promoted_or_err)
 			vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, normalized_lines)
-			state.mark_projected(bufnr, opts.ensure_write_autocmd)
+			state.mark_projected(bufnr, opts.ensure_projected_buffer_setup)
 			util.echo("activated marimo for " .. vim.fn.fnamemodify(vim.api.nvim_buf_get_name(bufnr), ":~:."))
 			return
 		end
