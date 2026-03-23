@@ -182,6 +182,54 @@ local function test_dedupes_consecutive_empty_cells()
 	assert_eq(normalized[7], nil)
 end
 
+local function test_find_cell_start_rows_supports_optioned_markers()
+	local starts = private.find_cell_start_rows({
+		"# + {marimo}",
+		"",
+		"x = 1",
+		"",
+		"# + {hide_code=True}",
+		"",
+		"y = 2",
+	})
+
+	assert_eq(vim.inspect(starts), vim.inspect({ 1, 5 }))
+end
+
+local function test_first_content_row_after_marker_skips_blank_lines()
+	local row = private.first_content_row_after_marker({
+		"# + {marimo}",
+		"",
+		"",
+		"x = 1",
+		"",
+		"# +",
+		"",
+	}, 1)
+
+	assert_eq(row, 4)
+end
+
+local function test_normalize_collapses_trailing_empty_cells()
+	local normalized = private.normalize_projected_buffer_lines({
+		"# + {marimo}",
+		"",
+		"x = 1",
+		"",
+		"# +",
+		"",
+		"# +",
+		"",
+	})
+
+	assert_eq(normalized[1], "# + {marimo}")
+	assert_eq(normalized[2], "")
+	assert_eq(normalized[3], "x = 1")
+	assert_eq(normalized[4], "")
+	assert_eq(normalized[5], "# +")
+	assert_eq(normalized[6], nil)
+end
+
 local tests = {
 	test_looks_like_marimo_with_bare_import,
 	test_looks_like_projected_with_plain_markers,
@@ -194,6 +242,9 @@ local tests = {
 	test_as_json_object_encodes_empty_tables_as_dicts,
 	test_normalize_projected_buffer_spacing,
 	test_dedupes_consecutive_empty_cells,
+	test_find_cell_start_rows_supports_optioned_markers,
+	test_first_content_row_after_marker_skips_blank_lines,
+	test_normalize_collapses_trailing_empty_cells,
 }
 
 for _, test in ipairs(tests) do

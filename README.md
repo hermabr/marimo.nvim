@@ -38,6 +38,33 @@ sh ./dev/minimal-nvim-nolazy
 Both launchers set a separate `NVIM_APPNAME`, so they keep their state out of
 your normal Neovim config.
 
+## Features
+
+- Projects marimo notebooks into `# +` cells for editing.
+- Normalizes projected buffers so marker spacing stays stable and consecutive
+  empty cells collapse to a single empty cell.
+- Adds buffer-local cell navigation for projected marimo buffers:
+  ` [m` jumps to the previous cell and `]m` jumps to the next cell.
+- Automatically creates a new trailing `# +` cell when jumping past the last
+  cell.
+
+You can also use:
+
+- `:MarimoCellPrev`
+- `:MarimoCellNext`
+- `:MarimoNormalize`
+
+The default keymaps can be changed or disabled in `setup`:
+
+```lua
+require("marimo").setup({
+  keymaps = {
+    prev_cell = "[m",
+    next_cell = "]m",
+  },
+})
+```
+
 ## Test
 
 Run:
