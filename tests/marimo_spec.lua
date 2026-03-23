@@ -77,6 +77,20 @@ y = x + 1
 print(y)
 ]]
 
+local LEADING_TEXT_WITH_MARKERS = [[
+x = 1
+y = x + 1
+
+# +
+
+z = y + 1
+z
+
+# +
+
+print(z)
+]]
+
 local function test_find_project_root_prefers_uv_lock()
 	local root = make_path("project")
 	local nested = root .. "/nested"
@@ -143,6 +157,25 @@ local function test_manual_activation_wraps_plain_python_in_one_cell()
 	assert_eq(#vim.b.marimo_cells, 1)
 end
 
+local function test_manual_activation_uses_leading_text_as_first_cell_before_markers()
+	local path = make_path("leading_text_with_markers.py")
+	write_file(path, LEADING_TEXT_WITH_MARKERS)
+	edit(path)
+
+	assert_truthy(not vim.b.marimo_projected)
+	vim.cmd("Marimo on")
+
+	local lines = vim.api.nvim_buf_get_lines(0, 0, -1, false)
+	assert_eq(lines[1], "# + {marimo}")
+	assert_matches(table.concat(lines, "\n"), "x = 1")
+	assert_matches(table.concat(lines, "\n"), "z = y %+ 1")
+	assert_matches(table.concat(lines, "\n"), "print%(z%)")
+	assert_eq(#vim.b.marimo_cells, 3)
+	assert_eq(vim.b.marimo_cells[1].code, "x = 1\ny = x + 1")
+	assert_eq(vim.b.marimo_cells[2].code, "z = y + 1\nz")
+	assert_eq(vim.b.marimo_cells[3].code, "print(z)")
+end
+
 marimo.setup()
 
 local tests = {
@@ -151,6 +184,7 @@ local tests = {
 	test_activate_projected_notebook_and_write_raw_marimo_file,
 	test_generic_projected_notebook_is_promoted,
 	test_manual_activation_wraps_plain_python_in_one_cell,
+	test_manual_activation_uses_leading_text_as_first_cell_before_markers,
 }
 
 for _, test in ipairs(tests) do
