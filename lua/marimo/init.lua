@@ -29,7 +29,7 @@ local function ensure_sync_autocmd(bufnr)
 	if vim.b[bufnr].marimo_sync_hook then
 		return
 	end
-	vim.api.nvim_create_autocmd({ "TextChanged", "TextChangedI" }, {
+	vim.api.nvim_create_autocmd({ "TextChanged", "InsertLeave" }, {
 		group = group,
 		buffer = bufnr,
 		callback = function(args)
