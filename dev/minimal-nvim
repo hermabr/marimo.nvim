@@ -1,0 +1,9 @@
+#!/usr/bin/env sh
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+APPNAME="${NVIM_APPNAME:-marimo-nvim-dev}"
+
+export NVIM_APPNAME="$APPNAME"
+
+exec nvim -u "$ROOT/dev/minimal-init.lua" "$@"
