@@ -24,19 +24,19 @@ end
 
 local function worker_script_path()
 	local root = vim.fn.fnamemodify(source, ":p:h:h:h")
-	return root .. "/python/marimo_nvim_worker.py"
+	return root
 end
 
 local function launch_spec(path)
 	local project_root, has_project = find_project_root(path)
-	local script = worker_script_path()
+	local root = worker_script_path()
 	local cmd = { "uv", "run" }
 	local runtime_kind = "uv"
 	if has_project then
 		vim.list_extend(cmd, { "--project", project_root })
 		runtime_kind = "uv_project"
 	end
-	vim.list_extend(cmd, { "--with", "marimo", "python", script })
+	vim.list_extend(cmd, { "--directory", root, "--with", "marimo", "python", "-m", "marimo_nvim_py.worker" })
 	return {
 		project_root = project_root,
 		runtime_kind = runtime_kind,

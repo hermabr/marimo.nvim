@@ -1,19 +1,22 @@
 [project]
-name = "marimo-nvim-dev"
+name = "marimo-nvim-py"
 version = "0.1.0"
 description = "Development environment for marimo.nvim"
-requires-python = ">=3.10"
-dependencies = [
-  "marimo",
-]
+requires-python = ">=3.14"
+dependencies = []
 
 [dependency-groups]
 dev = [
+  "marimo",
   "pytest",
   "ruff",
   "ty",
 ]
 
+[tool.uv.build-backend]
+module-root = ""
+module-name = "marimo_nvim_py"
+
 [tool.pytest.ini_options]
-pythonpath = ["src"]
+pythonpath = ["."]
 testpaths = ["tests/python"]
