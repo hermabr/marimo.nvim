@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from marimo_nvim_py.worker import Worker, dedupe_empty_cells, parse_projected_cells, promote_first_marker_to_marimo
+from marimo_nvim_py.projected import dedupe_empty_cells, parse_projected_cells, promote_first_marker_to_marimo
+from marimo_nvim_py.sessions import Worker
 
 
 RAW_NOTEBOOK = """\

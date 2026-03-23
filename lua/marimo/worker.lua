@@ -23,15 +23,15 @@ end
 
 local function worker_script_path()
 	local root = vim.fn.fnamemodify(source, ":p:h:h:h")
-	return root
+	return root .. "/python/marimo_nvim_worker.py"
 end
 
 local function launch_spec(project_root)
-	local script_root = worker_script_path()
+	local script = worker_script_path()
 	local specs = {
-		{ runtime_kind = "uv_project", cmd = { "uv", "run", "--project", project_root, "--directory", script_root, "python", "-m", "marimo_nvim_py" } },
-		{ runtime_kind = "uv_with_marimo", cmd = { "uv", "run", "--with", "marimo", "--directory", script_root, "python", "-m", "marimo_nvim_py" } },
-		{ runtime_kind = "python", cmd = { "python3", "-m", "marimo_nvim_py" } },
+		{ runtime_kind = "uv_project", cmd = { "uv", "run", "--project", project_root, "python", script } },
+		{ runtime_kind = "uv_with_marimo", cmd = { "uv", "run", "--with", "marimo", "python", script } },
+		{ runtime_kind = "python", cmd = { "python3", script } },
 	}
 	return specs
 end
