@@ -23,15 +23,15 @@ end
 
 local function worker_script_path()
 	local root = vim.fn.fnamemodify(source, ":p:h:h:h")
-	return root .. "/python/marimo_nvim_worker.py"
+	return root
 end
 
 local function launch_spec(project_root)
-	local script = worker_script_path()
+	local script_root = worker_script_path()
 	local specs = {
-		{ runtime_kind = "uv_project", cmd = { "uv", "run", "--project", project_root, "python", script } },
-		{ runtime_kind = "uv_with_marimo", cmd = { "uv", "run", "--with", "marimo", "python", script } },
-		{ runtime_kind = "python", cmd = { "python3", script } },
+		{ runtime_kind = "uv_project", cmd = { "uv", "run", "--project", project_root, "--directory", script_root, "python", "-m", "marimo_nvim_py" } },
+		{ runtime_kind = "uv_with_marimo", cmd = { "uv", "run", "--with", "marimo", "--directory", script_root, "python", "-m", "marimo_nvim_py" } },
+		{ runtime_kind = "python", cmd = { "python3", "-m", "marimo_nvim_py" } },
 	}
 	return specs
 end
@@ -46,6 +46,7 @@ local function ensure_worker(project_root)
 	local last_error = nil
 
 	for _, spec in ipairs(specs) do
+		local pythonpath = worker_script_path() .. "/src"
 		local worker = {
 			project_root = project_root,
 			pending = {},
@@ -54,6 +55,9 @@ local function ensure_worker(project_root)
 		}
 
 		worker.job_id = vim.fn.jobstart(spec.cmd, {
+			env = {
+				PYTHONPATH = pythonpath,
+			},
 			stdout_buffered = false,
 			stderr_buffered = true,
 			on_stdout = function(_, data)

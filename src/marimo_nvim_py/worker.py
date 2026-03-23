@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import sys
 import uuid
 from dataclasses import dataclass
@@ -299,7 +298,9 @@ class Worker:
     def __init__(self) -> None:
         self.sessions: dict[str, Session] = {}
 
-    def _build_notebook(self, path: str, header: str | None, app_options: dict[str, Any], cells: list[dict[str, Any]]) -> tuple[str, dict[str, Any], list[dict[str, Any]]]:
+    def _build_notebook(
+        self, path: str, header: str | None, app_options: dict[str, Any], cells: list[dict[str, Any]]
+    ) -> tuple[str, dict[str, Any], list[dict[str, Any]]]:
         notebook = NotebookSerializationV1(
             app=AppInstantiation(options=app_options or {}),
             header=Header(value=header) if header else None,
@@ -322,8 +323,16 @@ class Worker:
         projected_lines, spans = render_projected_lines(cells)
         out_cells: list[dict[str, Any]] = []
         for idx, cell in enumerate(cells):
-            projection_range = spans[idx] if idx < len(spans) else {"start_line": 1, "start_col": 1, "end_line": 1, "end_col": 1}
-            canonical_range = canonical_ranges[idx] if idx < len(canonical_ranges) else {"start_line": 1, "start_col": 1, "end_line": 1, "end_col": 1}
+            projection_range = (
+                spans[idx]
+                if idx < len(spans)
+                else {"start_line": 1, "start_col": 1, "end_line": 1, "end_col": 1}
+            )
+            canonical_range = (
+                canonical_ranges[idx]
+                if idx < len(canonical_ranges)
+                else {"start_line": 1, "start_col": 1, "end_line": 1, "end_col": 1}
+            )
             out_cells.append(
                 {
                     "id": cell["id"],
@@ -351,14 +360,7 @@ class Worker:
 
     def _reconcile_ids(self, previous: list[dict[str, Any]] | None, parsed_cells: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if not previous:
-            return [
-                {
-                    **cell,
-                    "id": uuid.uuid4().hex,
-                    "editor_status": "clean",
-                }
-                for cell in parsed_cells
-            ]
+            return [{**cell, "id": uuid.uuid4().hex, "editor_status": "clean"} for cell in parsed_cells]
         previous_by_key: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
         for old in previous:
             key = (old["name"], json.dumps(old.get("options", {}), sort_keys=True), old["code"])
@@ -383,7 +385,13 @@ class Worker:
                 result.append({**cell, "id": uuid.uuid4().hex, "editor_status": "edited"})
             else:
                 matched_previous_ids.add(matched["id"])
-                status = "clean" if matched["code"] == cell["code"] and matched.get("options", {}) == cell.get("options", {}) and matched["name"] == cell["name"] else "edited"
+                status = (
+                    "clean"
+                    if matched["code"] == cell["code"]
+                    and matched.get("options", {}) == cell.get("options", {})
+                    and matched["name"] == cell["name"]
+                    else "edited"
+                )
                 result.append({**cell, "id": matched["id"], "editor_status": status})
         return result
 
@@ -552,7 +560,3 @@ def main() -> int:
         sys.stdout.write(json.dumps(response) + "\n")
         sys.stdout.flush()
     return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
