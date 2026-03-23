@@ -46,7 +46,6 @@ local function ensure_worker(project_root)
 	local last_error = nil
 
 	for _, spec in ipairs(specs) do
-		local pythonpath = worker_script_path() .. "/src"
 		local worker = {
 			project_root = project_root,
 			pending = {},
@@ -55,9 +54,6 @@ local function ensure_worker(project_root)
 		}
 
 		worker.job_id = vim.fn.jobstart(spec.cmd, {
-			env = {
-				PYTHONPATH = pythonpath,
-			},
 			stdout_buffered = false,
 			stderr_buffered = true,
 			on_stdout = function(_, data)
