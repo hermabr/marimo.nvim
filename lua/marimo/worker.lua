@@ -57,31 +57,40 @@ local function ensure_worker(project_root)
 			stdout_buffered = false,
 			stderr_buffered = true,
 			on_stdout = function(_, data)
-				if not data then
+				if not data or #data == 0 then
 					return
 				end
-				for _, chunk in ipairs(data) do
-					if chunk ~= "" then
-						worker.stdout_buffer = worker.stdout_buffer .. chunk
-					end
+				worker.stdout_buffer = worker.stdout_buffer .. (data[1] or "")
+				if #data == 1 then
+					return
 				end
-				while true do
-					local newline = worker.stdout_buffer:find("\n", 1, true)
-					if not newline then
-						break
+
+				local ok, decoded = pcall(vim.json.decode, worker.stdout_buffer)
+				if ok and decoded and decoded.id ~= nil then
+					local pending = worker.pending[decoded.id]
+					if pending then
+						pending.response = decoded
 					end
-					local line = worker.stdout_buffer:sub(1, newline - 1)
-					worker.stdout_buffer = worker.stdout_buffer:sub(newline + 1)
+				elseif worker.stdout_buffer ~= "" then
+					last_error = "failed to decode marimo worker response: " .. worker.stdout_buffer
+				end
+
+				for idx = 2, #data - 1 do
+					local line = data[idx]
 					if line ~= "" then
-						local ok, decoded = pcall(vim.json.decode, line)
-						if ok and decoded and decoded.id ~= nil then
-							local pending = worker.pending[decoded.id]
+						local line_ok, line_decoded = pcall(vim.json.decode, line)
+						if line_ok and line_decoded and line_decoded.id ~= nil then
+							local pending = worker.pending[line_decoded.id]
 							if pending then
-								pending.response = decoded
+								pending.response = line_decoded
 							end
+						else
+							last_error = "failed to decode marimo worker response: " .. line
 						end
 					end
 				end
+
+				worker.stdout_buffer = data[#data] or ""
 			end,
 			on_stderr = function(_, data)
 				if not data then
