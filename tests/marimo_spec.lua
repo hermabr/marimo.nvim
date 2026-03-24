@@ -236,6 +236,21 @@ local function test_manual_activation_rejects_unnamed_buffers()
 	assert_eq(vim.b.marimo_session_id, nil)
 end
 
+local function test_manual_activation_preserves_dirty_state()
+	local path = make_path("dirty_activation.py")
+	write_file(path, "x = 1")
+	edit(path)
+
+	vim.api.nvim_buf_set_lines(0, -1, -1, false, { "", "y = 2" })
+	assert_truthy(vim.bo.modified)
+
+	vim.cmd("Marimo")
+	assert_truthy(vim.b.marimo_projected)
+	assert_truthy(vim.bo.modified)
+	assert_matches(table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), "\n"), "y = 2")
+	assert_eq(read_file(path), "x = 1")
+end
+
 marimo.setup()
 
 local tests = {
@@ -249,6 +264,7 @@ local tests = {
 	test_deactivation_clears_render_extmarks,
 	test_failed_deactivation_keeps_worker_session_alive,
 	test_manual_activation_rejects_unnamed_buffers,
+	test_manual_activation_preserves_dirty_state,
 }
 
 for _, test in ipairs(tests) do

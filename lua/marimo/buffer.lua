@@ -40,13 +40,12 @@ local function set_projected_buffer(bufnr, payload, keep_modified)
 	session.set_session(bufnr, payload)
 	render.render(bufnr, payload.cells)
 	lsp_bridge.sync_mirror(bufnr, payload.canonical_source)
-	if not keep_modified then
-		vim.bo[bufnr].modified = false
-	end
+	vim.bo[bufnr].modified = keep_modified and true or false
 end
 
 local function open_with_worker(bufnr, input_kind, opts)
 	local filepath = vim.api.nvim_buf_get_name(bufnr)
+	local keep_modified = vim.bo[bufnr].modified
 	local payload, err = worker.request(filepath, "open_session", {
 		path = filepath,
 		content = util.join_lines(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)),
@@ -56,7 +55,7 @@ local function open_with_worker(bufnr, input_kind, opts)
 		util.notify("failed to open marimo session: " .. err, vim.log.levels.ERROR)
 		return false
 	end
-	set_projected_buffer(bufnr, payload, false)
+	set_projected_buffer(bufnr, payload, keep_modified)
 	opts.ensure_write_autocmd(bufnr)
 	if opts.ensure_sync_autocmd then
 		opts.ensure_sync_autocmd(bufnr)
