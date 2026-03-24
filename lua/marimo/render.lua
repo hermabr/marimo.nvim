@@ -2,8 +2,12 @@ local M = {}
 
 local namespace = vim.api.nvim_create_namespace("marimo.nvim.cells")
 
-function M.render(bufnr, cells)
+function M.clear(bufnr)
 	vim.api.nvim_buf_clear_namespace(bufnr, namespace, 0, -1)
+end
+
+function M.render(bufnr, cells)
+	M.clear(bufnr)
 	for _, cell in ipairs(cells or {}) do
 		local line = math.max((cell.projection_range or {}).start_line or 1, 1) - 1
 		local status = cell.editor_status or "clean"

@@ -20,7 +20,6 @@ function M.setup(opts)
 			local lines = vim.api.nvim_buf_get_lines(args.buf, 0, -1, false)
 			if markers.looks_like_marimo(lines) then
 				api.project_buffer(args.buf, { ensure_write_autocmd = opts.ensure_write_autocmd })
-				util.echo("activated marimo for " .. vim.fn.fnamemodify(vim.api.nvim_buf_get_name(args.buf), ":~:."))
 			end
 		end,
 	})
@@ -53,7 +52,7 @@ function M.setup(opts)
 			return
 		end
 
-		util.echo(string.format("marimo mode %s for this buffer", enabled and "enabled" or "disabled"))
+		util.notify(string.format("marimo %s", enabled and "enabled" or "disabled"))
 	end, {
 		nargs = "?",
 		complete = function()

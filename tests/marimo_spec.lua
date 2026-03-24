@@ -191,6 +191,20 @@ local function test_marimo_command_toggles_activation_in_one_step()
 	assert_eq(vim.api.nvim_buf_get_lines(0, 0, -1, false)[1], "x = 1")
 end
 
+local function test_deactivation_clears_render_extmarks()
+	local path = make_path("toggle_extmarks.py")
+	write_file(path, PLAIN_PYTHON)
+	edit(path)
+
+	vim.cmd("Marimo")
+	assert_truthy(vim.b.marimo_projected)
+	assert_truthy(#vim.api.nvim_buf_get_extmarks(0, -1, 0, -1, {}) > 0)
+
+	vim.cmd("Marimo")
+	assert_truthy(not vim.b.marimo_projected)
+	assert_eq(#vim.api.nvim_buf_get_extmarks(0, -1, 0, -1, {}), 0)
+end
+
 marimo.setup()
 
 local tests = {
@@ -201,6 +215,7 @@ local tests = {
 	test_manual_activation_wraps_plain_python_in_one_cell,
 	test_manual_activation_uses_leading_text_as_first_cell_before_markers,
 	test_marimo_command_toggles_activation_in_one_step,
+	test_deactivation_clears_render_extmarks,
 }
 
 for _, test in ipairs(tests) do

@@ -26,6 +26,7 @@ function M.reload_raw_buffer(bufnr)
 
 	local raw_lines = vim.fn.readfile(filepath)
 	vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, raw_lines)
+	render.clear(bufnr)
 	state.clear_projected_state(bufnr)
 	vim.bo[bufnr].modified = false
 	return true
@@ -145,30 +146,24 @@ function M.activate(bufnr, opts)
 	local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
 
 	if markers.looks_like_marimo(lines) then
-		if M.project_buffer(bufnr, opts) ~= false then
-			util.echo("activated marimo for " .. vim.fn.fnamemodify(vim.api.nvim_buf_get_name(bufnr), ":~:."))
-		end
+		M.project_buffer(bufnr, opts)
 		return
 	end
 
 	if markers.looks_like_projected(lines) then
-		if open_with_worker(bufnr, "projected", opts) then
-			util.echo("activated marimo for " .. vim.fn.fnamemodify(vim.api.nvim_buf_get_name(bufnr), ":~:."))
-		end
+		open_with_worker(bufnr, "projected", opts)
 		return
 	end
 
 	if markers.has_any_projected_markers(lines) then
-		if opts.manual and open_with_worker(bufnr, "generic_projected_promotable", opts) then
-			util.echo("activated marimo for " .. vim.fn.fnamemodify(vim.api.nvim_buf_get_name(bufnr), ":~:."))
+		if opts.manual then
+			open_with_worker(bufnr, "generic_projected_promotable", opts)
 		end
 		return
 	end
 
 	if opts.manual then
-		if open_with_worker(bufnr, "manual_python", opts) then
-			util.echo("activated marimo for " .. vim.fn.fnamemodify(vim.api.nvim_buf_get_name(bufnr), ":~:."))
-		end
+		open_with_worker(bufnr, "manual_python", opts)
 		return
 	end
 
