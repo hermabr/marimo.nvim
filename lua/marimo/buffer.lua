@@ -34,6 +34,16 @@ local function is_file_buffer(bufnr)
 	return name ~= "" and vim.bo[bufnr].buftype == ""
 end
 
+local function with_internal_buffer_update(bufnr, fn)
+	vim.b[bufnr].marimo_internal_update = true
+	local ok, result = pcall(fn)
+	vim.b[bufnr].marimo_internal_update = false
+	if not ok then
+		error(result)
+	end
+	return result
+end
+
 local function stop_autorun_timer(bufnr)
 	local entry = state_for(bufnr)
 	local timer = entry.timer
@@ -85,7 +95,9 @@ end
 local function apply_projection_payload(bufnr, payload, keep_modified)
 	local current = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
 	if vim.deep_equal(current, payload.projected_lines or {}) == false then
-		vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, payload.projected_lines or {})
+		with_internal_buffer_update(bufnr, function()
+			vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, payload.projected_lines or {})
+		end)
 	end
 	apply_runtime_payload(bufnr, payload)
 	lsp_bridge.sync_mirror(bufnr, payload.canonical_source)
@@ -450,6 +462,45 @@ function M.activate(bufnr, opts)
 	end
 
 	util.notify("buffer is neither a real marimo notebook nor a projected `# +` notebook", vim.log.levels.WARN)
+end
+
+function M.reconcile_buffer(bufnr, opts)
+	opts = opts or {}
+	bufnr = bufnr or vim.api.nvim_get_current_buf()
+	if not state.is_enabled(bufnr) or not is_file_buffer(bufnr) then
+		return
+	end
+
+	local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+	if vim.b[bufnr].marimo_projected then
+		if markers.looks_like_projected(lines) then
+			if opts.ensure_projected_buffer_setup then
+				opts.ensure_projected_buffer_setup(bufnr)
+			end
+			render.render(bufnr, vim.b[bufnr].marimo_cells or {})
+			return
+		end
+		if markers.looks_like_marimo(lines) then
+			local cells = vim.b[bufnr].marimo_cells or {}
+			if vim.b[bufnr].marimo_session_id and #cells > 0 then
+				local projected_lines = markers.render_projected_buffer_lines(cells)
+				with_internal_buffer_update(bufnr, function()
+					vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, projected_lines)
+				end)
+				if opts.ensure_projected_buffer_setup then
+					opts.ensure_projected_buffer_setup(bufnr)
+				end
+				render.render(bufnr, cells)
+				return
+			end
+			open_with_worker(bufnr, "raw_marimo", opts)
+		end
+		return
+	end
+
+	if markers.looks_like_marimo(lines) then
+		M.project_buffer(bufnr, opts)
+	end
 end
 
 function M.set_mode(enabled, opts)

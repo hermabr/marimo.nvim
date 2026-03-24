@@ -576,6 +576,81 @@ local function test_sync_buffer_updates_reactive_outputs()
 	assert_matches(lines, " 4")
 end
 
+local function test_reentering_reprojects_after_raw_reload()
+	local path = make_path("reenter_reload.py")
+	local other = make_path("reenter_other.py")
+	write_file(path, RAW_NOTEBOOK)
+	write_file(other, "value = 1")
+	edit(path)
+
+	assert_eq(vim.api.nvim_buf_get_lines(0, 0, 1, false)[1], "# + {marimo}")
+	assert_truthy(vim.b.marimo_projected)
+	local session_id = vim.b.marimo_session_id
+	local bufnr = vim.api.nvim_get_current_buf()
+	local previous_hidden = vim.o.hidden
+
+	vim.o.hidden = true
+	vim.fn.writefile(vim.split(RAW_NOTEBOOK, "\n", { plain = true }), path)
+	vim.cmd("edit " .. vim.fn.fnameescape(other))
+	vim.cmd("buffer " .. bufnr)
+	vim.cmd("checktime")
+	vim.api.nvim_exec_autocmds("BufEnter", { buffer = bufnr, modeline = false })
+	vim.o.hidden = previous_hidden
+
+	assert_eq(vim.api.nvim_buf_get_lines(0, 0, 1, false)[1], "# + {marimo}")
+	assert_truthy(vim.b.marimo_projected)
+	assert_eq(vim.b.marimo_session_id, session_id)
+end
+
+local function test_reentering_buffer_does_not_rerun_runtime()
+	local path = make_path("reenter_runtime.py")
+	local other = make_path("reenter_runtime_other.py")
+	write_file(path, "# + {marimo}\n\nimport random\nrandom.random()")
+	write_file(other, "value = 1")
+	edit(path)
+
+	vim.cmd("Marimo on")
+	vim.cmd("MarimoRunAll")
+	wait_for_truthy(function()
+		local runtime_cells = vim.b.marimo_runtime_cells or {}
+		for _, runtime in pairs(runtime_cells) do
+			if runtime.output and runtime.output.data ~= nil then
+				return true
+			end
+		end
+		return false
+	end, "timed out waiting for runtime output")
+
+	local session_id = vim.b.marimo_session_id
+	local output_before = nil
+	for _, runtime in pairs(vim.b.marimo_runtime_cells or {}) do
+		if runtime.output and runtime.output.data ~= nil then
+			output_before = runtime.output.data
+			break
+		end
+	end
+	assert_truthy(output_before ~= nil, "expected runtime output before buffer switch")
+
+	local bufnr = vim.api.nvim_get_current_buf()
+	local previous_hidden = vim.o.hidden
+	vim.o.hidden = true
+	vim.cmd("edit " .. vim.fn.fnameescape(other))
+	vim.cmd("buffer " .. bufnr)
+	vim.api.nvim_exec_autocmds("BufEnter", { buffer = bufnr, modeline = false })
+	vim.o.hidden = previous_hidden
+
+	local output_after = nil
+	for _, runtime in pairs(vim.b.marimo_runtime_cells or {}) do
+		if runtime.output and runtime.output.data ~= nil then
+			output_after = runtime.output.data
+			break
+		end
+	end
+	assert_truthy(vim.b.marimo_projected)
+	assert_eq(vim.b.marimo_session_id, session_id)
+	assert_eq(output_after, output_before)
+end
+
 local function test_runtime_outputs_include_stdout()
 	local path = make_path("runtime_stdout.py")
 	write_file(path, '# + {marimo}\n\nprint("hello")\n1')
@@ -691,6 +766,8 @@ local tests = {
 	test_new_cell_autorun_streams_runtime_updates,
 	test_opening_without_running_does_not_render_idle_placeholders,
 	test_sync_buffer_updates_reactive_outputs,
+	test_reentering_reprojects_after_raw_reload,
+	test_reentering_buffer_does_not_rerun_runtime,
 	test_runtime_outputs_include_stdout,
 	test_runtime_outputs_include_stdout_after_html_output,
 	test_runtime_errors_include_descriptive_stderr_context,
