@@ -5,6 +5,7 @@ local markers = dofile(dir .. "/markers.lua")
 local state = dofile(dir .. "/state.lua")
 local buffer = dofile(dir .. "/buffer.lua")
 local commands = dofile(dir .. "/commands.lua")
+local worker = dofile(dir .. "/worker.lua")
 local navigation = dofile(dir .. "/navigation.lua")
 
 local M = {}
@@ -31,6 +32,22 @@ local function ensure_write_autocmd(bufnr)
 	vim.b[bufnr].marimo_write_hook = true
 end
 
+local function ensure_sync_autocmd(bufnr)
+	if vim.b[bufnr].marimo_sync_hook then
+		return
+	end
+	vim.api.nvim_create_autocmd({ "TextChanged", "InsertLeave" }, {
+		group = group,
+		buffer = bufnr,
+		callback = function(args)
+			if vim.b[args.buf].marimo_projected then
+				M.sync_buffer(args.buf)
+			end
+		end,
+	})
+	vim.b[bufnr].marimo_sync_hook = true
+end
+
 local function ensure_navigation_keymaps(bufnr)
 	if vim.b[bufnr].marimo_navigation_keymaps then
 		return
@@ -53,6 +70,7 @@ end
 
 local function ensure_projected_buffer_setup(bufnr)
 	ensure_write_autocmd(bufnr)
+	ensure_sync_autocmd(bufnr)
 	ensure_navigation_keymaps(bufnr)
 end
 
@@ -63,6 +81,7 @@ M.project_buffer = function(bufnr, opts)
 end
 
 M.write_buffer = buffer.write_buffer
+M.sync_buffer = buffer.sync_buffer
 
 M.mark_projected = function(bufnr)
 	return state.mark_projected(bufnr, ensure_projected_buffer_setup)
@@ -92,20 +111,21 @@ function M.setup(opts)
 		api = M,
 		ensure_projected_buffer_setup = ensure_projected_buffer_setup,
 	})
+	vim.api.nvim_create_autocmd("VimLeavePre", {
+		group = group,
+		callback = function()
+			worker.shutdown_all()
+		end,
+	})
 end
 
 M._private = {
 	looks_like_marimo = markers.looks_like_marimo,
 	looks_like_projected = markers.looks_like_projected,
 	has_any_projected_markers = markers.has_any_projected_markers,
-	parse_marker_line = markers.parse_marker_line,
-	parse_options_text = markers.parse_options_text,
-	parse_projected_cells = markers.parse_projected_cells,
-	dedupe_empty_cells = markers.dedupe_empty_cells,
 	as_json_object = util.as_json_object,
-	render_projected_lines = markers.render_projected_lines,
-	normalize_projected_buffer_lines = markers.normalize_projected_buffer_lines,
 	promote_first_marker_to_marimo = markers.promote_first_marker_to_marimo,
+	find_project_root = worker._private.find_project_root,
 	find_cell_start_rows = navigation.find_cell_start_rows,
 	first_content_row_after_marker = navigation.first_content_row_after_marker,
 }

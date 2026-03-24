@@ -2,8 +2,11 @@ local source = debug.getinfo(1, "S").source:sub(2)
 local dir = vim.fn.fnamemodify(source, ":h")
 local util = dofile(dir .. "/util.lua")
 local markers = dofile(dir .. "/markers.lua")
-local python = dofile(dir .. "/python.lua")
 local state = dofile(dir .. "/state.lua")
+local worker = dofile(dir .. "/worker.lua")
+local session = dofile(dir .. "/session.lua")
+local render = dofile(dir .. "/render.lua")
+local lsp_bridge = dofile(dir .. "/lsp_bridge.lua")
 
 local M = {}
 
@@ -23,8 +26,39 @@ function M.reload_raw_buffer(bufnr)
 
 	local raw_lines = vim.fn.readfile(filepath)
 	vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, raw_lines)
+	render.clear(bufnr)
 	state.clear_projected_state(bufnr)
 	vim.bo[bufnr].modified = false
+	return true
+end
+
+local function set_projected_buffer(bufnr, payload, keep_modified)
+	local current = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+	if vim.deep_equal(current, payload.projected_lines or {}) == false then
+		vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, payload.projected_lines or {})
+	end
+	session.set_session(bufnr, payload)
+	render.render(bufnr, payload.cells)
+	lsp_bridge.sync_mirror(bufnr, payload.canonical_source)
+	vim.bo[bufnr].modified = keep_modified and true or false
+end
+
+local function open_with_worker(bufnr, input_kind, opts)
+	local filepath = vim.api.nvim_buf_get_name(bufnr)
+	local keep_modified = vim.bo[bufnr].modified
+	local payload, err = worker.request(filepath, "open_session", {
+		path = filepath,
+		content = util.join_lines(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)),
+		input_kind = input_kind,
+	})
+	if err then
+		util.notify("failed to open marimo session: " .. err, vim.log.levels.ERROR)
+		return false
+	end
+	set_projected_buffer(bufnr, payload, keep_modified)
+	if opts.ensure_projected_buffer_setup then
+		opts.ensure_projected_buffer_setup(bufnr)
+	end
 	return true
 end
 
@@ -49,23 +83,7 @@ function M.project_buffer(bufnr, opts)
 		return
 	end
 
-	local filepath = vim.api.nvim_buf_get_name(bufnr)
-	local parsed, err = python.run(python.parse_script, {
-		content = util.join_lines(lines),
-		filepath = filepath,
-	})
-	if err then
-		util.notify("failed to parse marimo notebook: " .. err, vim.log.levels.ERROR)
-		return
-	end
-
-	local projected_lines = markers.render_projected_lines(parsed)
-	vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, projected_lines)
-	vim.b[bufnr].marimo_projected = true
-	vim.b[bufnr].marimo_header = parsed.header
-	vim.b[bufnr].marimo_app_options = util.as_json_object(parsed.app_options or {})
-	vim.bo[bufnr].modified = false
-	opts.ensure_projected_buffer_setup(bufnr)
+	open_with_worker(bufnr, "raw_marimo", opts)
 end
 
 function M.write_buffer(bufnr)
@@ -85,31 +103,35 @@ function M.write_buffer(bufnr)
 		return
 	end
 
-	local ok, cells_or_err = pcall(markers.parse_projected_cells, lines)
-	if not ok then
-		util.notify(cells_or_err, vim.log.levels.ERROR)
-		return
-	end
-	cells_or_err = markers.dedupe_empty_cells(cells_or_err)
-
-	local normalized_lines = markers.normalize_projected_buffer_lines(lines)
-	vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, normalized_lines)
-
-	local generated, err = python.run(python.generate_script, {
-		filepath = filepath,
-		header = vim.b[bufnr].marimo_header,
-		app_options = util.as_json_object(vim.b[bufnr].marimo_app_options or {}),
-		cells = cells_or_err,
+	local payload, err = worker.request(filepath, "write_session", {
+		session_id = vim.b[bufnr].marimo_session_id,
+		content = util.join_lines(lines),
 	})
 	if err then
-		util.notify("failed to generate marimo notebook: " .. err, vim.log.levels.ERROR)
+		util.notify("failed to write marimo notebook: " .. err, vim.log.levels.ERROR)
 		return
 	end
 
-	vim.fn.writefile(util.split_lines(generated), filepath)
-	vim.bo[bufnr].modified = false
+	set_projected_buffer(bufnr, payload, false)
 	vim.api.nvim_exec_autocmds("BufWritePost", { buffer = bufnr, modeline = false })
 	util.show_write_message(bufnr)
+end
+
+function M.sync_buffer(bufnr)
+	bufnr = bufnr or vim.api.nvim_get_current_buf()
+	if not vim.b[bufnr].marimo_projected or not vim.b[bufnr].marimo_session_id then
+		return
+	end
+	local filepath = vim.api.nvim_buf_get_name(bufnr)
+	local payload, err = worker.request(filepath, "sync_projection", {
+		session_id = vim.b[bufnr].marimo_session_id,
+		content = util.join_lines(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)),
+	})
+	if err then
+		util.notify("failed to sync marimo projection: " .. err, vim.log.levels.ERROR)
+		return
+	end
+	set_projected_buffer(bufnr, payload, true)
 end
 
 function M.activate(bufnr, opts)
@@ -119,35 +141,32 @@ function M.activate(bufnr, opts)
 		util.notify("marimo mode is disabled for this buffer", vim.log.levels.WARN)
 		return
 	end
+	if not is_file_buffer(bufnr) then
+		util.notify("current buffer is not a file buffer", vim.log.levels.WARN)
+		return
+	end
 	local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
 
 	if markers.looks_like_marimo(lines) then
 		M.project_buffer(bufnr, opts)
-		util.echo("activated marimo for " .. vim.fn.fnamemodify(vim.api.nvim_buf_get_name(bufnr), ":~:."))
 		return
 	end
 
 	if markers.looks_like_projected(lines) then
-		local normalized_lines = markers.normalize_projected_buffer_lines(lines)
-		vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, normalized_lines)
-		state.mark_projected(bufnr, opts.ensure_projected_buffer_setup)
-		util.echo("activated marimo for " .. vim.fn.fnamemodify(vim.api.nvim_buf_get_name(bufnr), ":~:."))
+		open_with_worker(bufnr, "projected", opts)
 		return
 	end
 
 	if markers.has_any_projected_markers(lines) then
-		local ok, promoted_or_err, changed = pcall(markers.promote_first_marker_to_marimo, lines)
-		if not ok then
-			util.notify(promoted_or_err, vim.log.levels.ERROR)
-			return
+		if opts.manual then
+			open_with_worker(bufnr, "generic_projected_promotable", opts)
 		end
-		if changed then
-			local normalized_lines = markers.normalize_projected_buffer_lines(promoted_or_err)
-			vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, normalized_lines)
-			state.mark_projected(bufnr, opts.ensure_projected_buffer_setup)
-			util.echo("activated marimo for " .. vim.fn.fnamemodify(vim.api.nvim_buf_get_name(bufnr), ":~:."))
-			return
-		end
+		return
+	end
+
+	if opts.manual then
+		open_with_worker(bufnr, "manual_python", opts)
+		return
 	end
 
 	util.notify("buffer is neither a real marimo notebook nor a projected `# +` notebook", vim.log.levels.WARN)
@@ -164,7 +183,18 @@ function M.set_mode(enabled, opts)
 	end
 
 	if vim.b[bufnr].marimo_projected then
-		return M.reload_raw_buffer(bufnr)
+		local session_id = vim.b[bufnr].marimo_session_id
+		local filepath = vim.api.nvim_buf_get_name(bufnr)
+		local ok, err = M.reload_raw_buffer(bufnr)
+		if not ok then
+			return ok, err
+		end
+		if session_id and filepath ~= "" then
+			worker.request(filepath, "close_session", {
+				session_id = session_id,
+			})
+		end
+		return true
 	end
 
 	return true

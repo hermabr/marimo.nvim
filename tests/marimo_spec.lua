@@ -13,238 +13,258 @@ local function assert_truthy(value, message)
 	end
 end
 
-local function assert_falsy(value, message)
-	if value then
-		error(message or ("expected falsy value, got " .. vim.inspect(value)))
+local function assert_matches(text, pattern, message)
+	if not tostring(text):match(pattern) then
+		error((message or "assert_matches failed") .. string.format("\npattern: %s\nactual: %s", pattern, vim.inspect(text)))
 	end
 end
 
-local function test_looks_like_marimo_with_bare_import()
-	assert_truthy(private.looks_like_marimo({
-		"import marimo",
-		'__generated_with = "0.21.1"',
-		'app = marimo.App(width="medium")',
-	}))
+local temp_root = vim.fn.tempname()
+vim.fn.mkdir(temp_root, "p")
+
+local function write_file(path, content)
+	vim.fn.writefile(vim.split(content, "\n", { plain = true }), path)
 end
 
-local function test_looks_like_projected_with_plain_markers()
-	assert_truthy(private.looks_like_projected({
-		"# + {marimo}",
-		"print('x')",
-	}))
+local function read_file(path)
+	return table.concat(vim.fn.readfile(path), "\n")
 end
 
-local function test_looks_like_projected_rejects_generic_notebooks()
-	assert_falsy(private.looks_like_projected({
-		"# +",
-		"print('x')",
-	}))
+local function edit(path)
+	vim.cmd("silent! %bwipeout!")
+	vim.cmd("edit " .. vim.fn.fnameescape(path))
 end
 
-local function test_promote_generic_projected_notebook_to_marimo()
-	assert_truthy(private.has_any_projected_markers({
-		"# +",
-		"print('x')",
-	}))
-
-	local promoted, changed = private.promote_first_marker_to_marimo({
-		"# +",
-		"print('x')",
-		"",
-		"# +",
-		"y = 2",
-	})
-
-	assert_truthy(changed)
-	assert_eq(promoted[1], "# + {marimo}")
-	assert_eq(promoted[4], "# +")
+local function make_path(name)
+	return temp_root .. "/" .. name
 end
 
-local function test_promote_leading_code_to_first_marimo_cell()
-	local promoted, changed = private.promote_first_marker_to_marimo({
-		'print("HEY")',
-		"",
-		"# +",
-		"",
-		"a = 1",
-	})
+local RAW_NOTEBOOK = [[
+import marimo
 
-	assert_truthy(changed)
-	assert_eq(promoted[1], "# + {marimo}")
-	assert_eq(promoted[2], "")
-	assert_eq(promoted[3], 'print("HEY")')
+__generated_with = "0.21.1"
+app = marimo.App()
+
+
+@app.cell
+def _():
+    x = 1
+    x
+    return
+
+
+if __name__ == "__main__":
+    app.run()
+]]
+
+local PROJECTED_NOTEBOOK = [[
+# + {marimo}
+
+x = 1
+x
+]]
+
+local GENERIC_PROJECTED = [[
+# +
+
+x = 1
+]]
+
+local PLAIN_PYTHON = [[
+x = 1
+
+y = x + 1
+print(y)
+]]
+
+local LEADING_TEXT_WITH_MARKERS = [[
+x = 1
+y = x + 1
+
+# +
+
+z = y + 1
+z
+
+# +
+
+print(z)
+]]
+
+local function test_find_project_root_prefers_uv_lock()
+	local root = make_path("project")
+	local nested = root .. "/nested"
+	vim.fn.mkdir(nested, "p")
+	write_file(root .. "/pyproject.toml", "[project]\nname='demo'\nversion='0.1.0'")
+	write_file(root .. "/uv.lock", "version = 1")
+	local notebook = nested .. "/notebook.py"
+	write_file(notebook, PROJECTED_NOTEBOOK)
+	assert_eq(private.find_project_root(notebook), root)
 end
 
-local function test_parse_marker_line_supports_plain_and_options()
-	local is_marker, opts = private.parse_marker_line("# +")
-	assert_truthy(is_marker)
-	assert_eq(opts, nil)
+local function test_activate_raw_notebook_projects_and_populates_session_state()
+	local path = make_path("raw_notebook.py")
+	write_file(path, RAW_NOTEBOOK)
+	edit(path)
 
-	is_marker, opts = private.parse_marker_line("# + {marimo, setup=True, hide_code=True}")
-	assert_truthy(is_marker)
-	assert_eq(opts, "{marimo, setup=True, hide_code=True}")
+	assert_eq(vim.api.nvim_buf_get_lines(0, 0, 1, false)[1], "# + {marimo}")
+	assert_truthy(vim.b.marimo_projected)
+	assert_truthy(vim.b.marimo_session_id)
+	assert_truthy(vim.b.marimo_projection_map)
+	assert_truthy(vim.b.marimo_cells)
+	assert_matches(vim.b.marimo_canonical_source, "@app%.cell")
+	assert_truthy(vim.b.marimo_projection_map.cells[1].canonical_range.start_line > 0)
 end
 
-local function test_parse_projected_cells_supports_plain_markers()
-	local cells = private.parse_projected_cells({
-		"# + {marimo}",
-		'print("HEY")',
-		"",
-		"# +",
-		"a = 5",
-		"a",
-		"",
-		"# +",
-		"b = 2",
-		"",
-		"# +",
-		"c = a / b",
-		"c",
-	})
+local function test_activate_projected_notebook_and_write_raw_marimo_file()
+	local path = make_path("projected_notebook.py")
+	write_file(path, PROJECTED_NOTEBOOK)
+	edit(path)
 
-	assert_eq(#cells, 4)
-	assert_eq(cells[1].name, "_")
-	assert_eq(cells[1].code, 'print("HEY")')
-	assert_eq(vim.json.encode(cells[1].options), "{}")
-	assert_eq(cells[4].code, "c = a / b\nc")
+	assert_truthy(not vim.b.marimo_projected)
+	vim.cmd("Marimo on")
+	assert_eq(vim.api.nvim_buf_get_lines(0, 0, 1, false)[1], "# + {marimo}")
+	vim.cmd("write")
+
+	local content = read_file(path)
+	assert_matches(content, "import marimo")
+	assert_matches(content, "@app%.cell")
+	assert_matches(content, "app%.run%(%)")
 end
 
-local function test_parse_projected_cells_supports_setup_cell()
-	local cells = private.parse_projected_cells({
-		"# + {marimo, setup=True, hide_code=True}",
-		"import marimo as mo",
-		"",
-		"# +",
-		"x = mo.ui.slider(1, 10)",
-		"x",
-	})
+local function test_generic_projected_notebook_is_promoted()
+	local path = make_path("generic_projected.py")
+	write_file(path, GENERIC_PROJECTED)
+	edit(path)
 
-	assert_eq(#cells, 2)
-	assert_eq(cells[1].name, "setup")
-	assert_eq(cells[1].code, "import marimo as mo")
-	assert_eq(cells[1].options.hide_code, true)
-	assert_eq(cells[2].name, "_")
+	assert_truthy(not vim.b.marimo_projected)
+	vim.cmd("Marimo on")
+	assert_eq(vim.api.nvim_buf_get_lines(0, 0, 1, false)[1], "# + {marimo}")
+	assert_truthy(vim.b.marimo_session_id)
 end
 
-local function test_as_json_object_encodes_empty_tables_as_dicts()
-	assert_eq(vim.json.encode(private.as_json_object({})), "{}")
-	assert_eq(vim.json.encode(private.as_json_object(nil)), "{}")
-	assert_eq(vim.json.encode(private.as_json_object({ hide_code = true })), '{"hide_code":true}')
+local function test_manual_activation_wraps_plain_python_in_one_cell()
+	local path = make_path("plain_python.py")
+	write_file(path, PLAIN_PYTHON)
+	edit(path)
+
+	assert_truthy(not vim.b.marimo_projected)
+	vim.cmd("Marimo on")
+	local lines = vim.api.nvim_buf_get_lines(0, 0, -1, false)
+	assert_eq(lines[1], "# + {marimo}")
+	assert_eq(lines[3], "x = 1")
+	assert_matches(table.concat(lines, "\n"), "print%(y%)")
+	assert_eq(#vim.b.marimo_cells, 1)
 end
 
-local function test_normalize_projected_buffer_spacing()
-	local normalized = private.normalize_projected_buffer_lines({
-		"# + {marimo}",
-		"",
-		"",
-		'print("HEY")',
-		"",
-		"",
-		"# +",
-		"",
-		"",
-		"a = 5",
-		"a",
-		"",
-		"",
-	})
+local function test_manual_activation_uses_leading_text_as_first_cell_before_markers()
+	local path = make_path("leading_text_with_markers.py")
+	write_file(path, LEADING_TEXT_WITH_MARKERS)
+	edit(path)
 
-	assert_eq(normalized[1], "# + {marimo}")
-	assert_eq(normalized[2], "")
-	assert_eq(normalized[3], 'print("HEY")')
-	assert_eq(normalized[4], "")
-	assert_eq(normalized[5], "# +")
-	assert_eq(normalized[6], "")
-	assert_eq(normalized[7], "a = 5")
-	assert_eq(normalized[8], "a")
-	assert_eq(normalized[9], nil)
+	assert_truthy(not vim.b.marimo_projected)
+	vim.cmd("Marimo on")
+
+	local lines = vim.api.nvim_buf_get_lines(0, 0, -1, false)
+	assert_eq(lines[1], "# + {marimo}")
+	assert_matches(table.concat(lines, "\n"), "x = 1")
+	assert_matches(table.concat(lines, "\n"), "z = y %+ 1")
+	assert_matches(table.concat(lines, "\n"), "print%(z%)")
+	assert_eq(#vim.b.marimo_cells, 3)
+	assert_eq(vim.b.marimo_cells[1].code, "x = 1\ny = x + 1")
+	assert_eq(vim.b.marimo_cells[2].code, "z = y + 1\nz")
+	assert_eq(vim.b.marimo_cells[3].code, "print(z)")
 end
 
-local function test_dedupes_consecutive_empty_cells()
-	local normalized = private.normalize_projected_buffer_lines({
-		"# + {marimo}",
-		"",
-		"",
-		"# +",
-		"",
-		"",
-		"# +",
-		"",
-		"value = 1",
-	})
+local function test_marimo_command_toggles_activation_in_one_step()
+	local path = make_path("toggle_plain_python.py")
+	write_file(path, PLAIN_PYTHON)
+	edit(path)
 
-	assert_eq(normalized[1], "# + {marimo}")
-	assert_eq(normalized[2], "")
-	assert_eq(normalized[3], "")
-	assert_eq(normalized[4], "# +")
-	assert_eq(normalized[5], "")
-	assert_eq(normalized[6], "value = 1")
-	assert_eq(normalized[7], nil)
+	assert_truthy(not vim.b.marimo_projected)
+	vim.cmd("Marimo")
+	assert_truthy(vim.b.marimo_projected)
+	assert_eq(#vim.b.marimo_cells, 1)
+
+	vim.cmd("Marimo")
+	assert_truthy(not vim.b.marimo_projected)
+	assert_eq(vim.api.nvim_buf_get_lines(0, 0, -1, false)[1], "x = 1")
 end
 
-local function test_find_cell_start_rows_supports_optioned_markers()
-	local starts = private.find_cell_start_rows({
-		"# + {marimo}",
-		"",
-		"x = 1",
-		"",
-		"# + {hide_code=True}",
-		"",
-		"y = 2",
-	})
+local function test_deactivation_clears_render_extmarks()
+	local path = make_path("toggle_extmarks.py")
+	write_file(path, PLAIN_PYTHON)
+	edit(path)
 
-	assert_eq(vim.inspect(starts), vim.inspect({ 1, 5 }))
+	vim.cmd("Marimo")
+	assert_truthy(vim.b.marimo_projected)
+	assert_truthy(#vim.api.nvim_buf_get_extmarks(0, -1, 0, -1, {}) > 0)
+
+	vim.cmd("Marimo")
+	assert_truthy(not vim.b.marimo_projected)
+	assert_eq(#vim.api.nvim_buf_get_extmarks(0, -1, 0, -1, {}), 0)
 end
 
-local function test_first_content_row_after_marker_skips_blank_lines()
-	local row = private.first_content_row_after_marker({
-		"# + {marimo}",
-		"",
-		"",
-		"x = 1",
-		"",
-		"# +",
-		"",
-	}, 1)
+local function test_failed_deactivation_keeps_worker_session_alive()
+	local path = make_path("dirty_toggle.py")
+	write_file(path, PLAIN_PYTHON)
+	edit(path)
 
-	assert_eq(row, 4)
+	vim.cmd("Marimo")
+	assert_truthy(vim.b.marimo_projected)
+	local session_id = vim.b.marimo_session_id
+
+	vim.api.nvim_buf_set_lines(0, -1, -1, false, { "", "extra = 1" })
+	assert_truthy(vim.bo.modified)
+
+	vim.cmd("Marimo")
+	assert_truthy(vim.b.marimo_projected)
+	assert_eq(vim.b.marimo_session_id, session_id)
+
+	vim.cmd("write")
+	local content = read_file(path)
+	assert_matches(content, "extra = 1")
 end
 
-local function test_normalize_collapses_trailing_empty_cells()
-	local normalized = private.normalize_projected_buffer_lines({
-		"# + {marimo}",
-		"",
-		"x = 1",
-		"",
-		"# +",
-		"",
-		"# +",
-		"",
-	})
+local function test_manual_activation_rejects_unnamed_buffers()
+	vim.cmd("silent! %bwipeout!")
+	vim.cmd("enew")
+	vim.api.nvim_buf_set_lines(0, 0, -1, false, { "x = 1" })
 
-	assert_eq(normalized[1], "# + {marimo}")
-	assert_eq(normalized[2], "")
-	assert_eq(normalized[3], "x = 1")
-	assert_eq(normalized[4], "")
-	assert_eq(normalized[5], "# +")
-	assert_eq(normalized[6], nil)
+	vim.cmd("Marimo")
+	assert_truthy(not vim.b.marimo_projected)
+	assert_eq(vim.b.marimo_session_id, nil)
 end
+
+local function test_manual_activation_preserves_dirty_state()
+	local path = make_path("dirty_activation.py")
+	write_file(path, "x = 1")
+	edit(path)
+
+	vim.api.nvim_buf_set_lines(0, -1, -1, false, { "", "y = 2" })
+	assert_truthy(vim.bo.modified)
+
+	vim.cmd("Marimo")
+	assert_truthy(vim.b.marimo_projected)
+	assert_truthy(vim.bo.modified)
+	assert_matches(table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), "\n"), "y = 2")
+	assert_eq(read_file(path), "x = 1")
+end
+
+marimo.setup()
 
 local tests = {
-	test_looks_like_marimo_with_bare_import,
-	test_looks_like_projected_with_plain_markers,
-	test_looks_like_projected_rejects_generic_notebooks,
-	test_promote_generic_projected_notebook_to_marimo,
-	test_promote_leading_code_to_first_marimo_cell,
-	test_parse_marker_line_supports_plain_and_options,
-	test_parse_projected_cells_supports_plain_markers,
-	test_parse_projected_cells_supports_setup_cell,
-	test_as_json_object_encodes_empty_tables_as_dicts,
-	test_normalize_projected_buffer_spacing,
-	test_dedupes_consecutive_empty_cells,
-	test_find_cell_start_rows_supports_optioned_markers,
-	test_first_content_row_after_marker_skips_blank_lines,
-	test_normalize_collapses_trailing_empty_cells,
+	test_find_project_root_prefers_uv_lock,
+	test_activate_raw_notebook_projects_and_populates_session_state,
+	test_activate_projected_notebook_and_write_raw_marimo_file,
+	test_generic_projected_notebook_is_promoted,
+	test_manual_activation_wraps_plain_python_in_one_cell,
+	test_manual_activation_uses_leading_text_as_first_cell_before_markers,
+	test_marimo_command_toggles_activation_in_one_step,
+	test_deactivation_clears_render_extmarks,
+	test_failed_deactivation_keeps_worker_session_alive,
+	test_manual_activation_rejects_unnamed_buffers,
+	test_manual_activation_preserves_dirty_state,
 }
 
 for _, test in ipairs(tests) do
