@@ -5,6 +5,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import cast
 
 from marimo_nvim_py.projected import dedupe_empty_cells, drop_empty_cells, parse_projected_cells, promote_first_marker_to_marimo
@@ -175,6 +176,39 @@ def test_write_projection_writes_canonical_marimo_source(tmp_path: Path) -> None
     assert "import marimo" in written
     assert "@app.cell" in written
     assert result["last_saved_source_hash"]
+
+
+def test_reload_from_disk_closes_previous_runtime_session(tmp_path: Path) -> None:
+    worker = Worker()
+    path = tmp_path / "reload_me.py"
+    initial = worker.open_session(
+        {
+            "path": str(path),
+            "content": "# + {marimo}\n\nx = 1\nx",
+            "input_kind": "projected",
+            "project_root": str(tmp_path),
+            "runtime_kind": "uv_project",
+        }
+    )
+    old_session = worker.sessions[initial["session_id"]]
+    closed = {"value": False}
+
+    def close() -> None:
+        closed["value"] = True
+
+    old_runtime_session = cast(object, SimpleNamespace(close=close))
+    old_session.runtime_session = old_runtime_session
+
+    path.write_text(RAW_NOTEBOOK, encoding="utf-8")
+    reloaded = worker.reload_from_disk({"session_id": initial["session_id"]})
+
+    new_session = worker.sessions[initial["session_id"]]
+    assert reloaded["session_id"] == initial["session_id"]
+    assert new_session is not old_session
+    assert new_session.runtime_session is not None
+    assert new_session.runtime_session is not old_runtime_session
+    assert closed["value"] is True
+    worker.shutdown({})
 
 
 def test_open_session_from_raw_notebook_drops_empty_cells(tmp_path: Path) -> None:

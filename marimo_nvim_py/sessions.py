@@ -595,16 +595,12 @@ class Worker:
         settled_since: float | None = None
         last_emitted = dict(session.runtime_cells or {})
         while time.monotonic() < deadline:
-            session.runtime_session.flush_messages()
-            current_runtime = self._refresh_runtime_cells(session)
-            session.runtime_cells = current_runtime
+            completed_runs, notifications, current_runtime = self._runtime_progress_snapshot(session)
             changed = self._changed_runtime_cells(last_emitted, current_runtime)
             if changed:
                 self._emit_runtime_update(session, request_id, changed)
                 last_emitted = dict(current_runtime)
-            view = session.runtime_session.session_view
-            notifications = list(view.cell_notifications.values())
-            if session.runtime_consumer.completed_runs > previous_completed_runs and notifications:
+            if completed_runs > previous_completed_runs and notifications:
                 all_settled = True
                 for notification in notifications:
                     if notification.status in {"running", "queued"}:
@@ -620,16 +616,22 @@ class Worker:
             time.sleep(0.01)
         raise TimeoutError("timed out waiting for marimo runtime to finish")
 
-    def _refresh_runtime_cells(self, session: Session) -> dict[str, dict[str, Any]]:
+    def _runtime_progress_snapshot(self, session: Session) -> tuple[int, list[Any], dict[str, dict[str, Any]]]:
         with session.runtime_lock:
             if session.runtime_session is None:
                 session.runtime_cells = {}
-                return {}
+                return 0, [], {}
             session.runtime_session.flush_messages()
             runtime_cells = self._serialized_runtime_cells(session)
             runtime_cells = self._merge_multiple_definition_details(session, runtime_cells)
             session.runtime_cells = runtime_cells
-            return runtime_cells
+            notifications = list(session.runtime_session.session_view.cell_notifications.values())
+            completed_runs = session.runtime_consumer.completed_runs if session.runtime_consumer else 0
+            return completed_runs, notifications, runtime_cells
+
+    def _refresh_runtime_cells(self, session: Session) -> dict[str, dict[str, Any]]:
+        _, _, runtime_cells = self._runtime_progress_snapshot(session)
+        return runtime_cells
 
     def _perform_runtime_operation(self, operation: Any) -> Any:
         return operation()
@@ -894,6 +896,9 @@ class Worker:
         content = params["content"]
         input_kind = params["input_kind"]
         session_id = path
+        previous_session = self.sessions.get(session_id)
+        if previous_session and previous_session.runtime_session is not None:
+            previous_session.runtime_session.close()
         project_root = params.get("project_root") or str(Path(path).parent)
         runtime_kind = params.get("runtime_kind") or "python"
         if input_kind == "raw_marimo":

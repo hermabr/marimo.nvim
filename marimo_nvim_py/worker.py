@@ -88,12 +88,7 @@ def main() -> int:
             emit_response({"id": None, "ok": False, "error": _error("protocol_error", str(exc))})
             continue
         if payload.get("method") == "interrupt":
-            interrupt_thread = threading.Thread(
-                target=handle_payload,
-                kwargs={"payload": payload, "allow_immediate_interrupt": True},
-                daemon=True,
-            )
-            interrupt_thread.start()
+            handle_payload(payload, allow_immediate_interrupt=True)
             continue
         request_queue.put(payload)
     request_queue.put(None)
