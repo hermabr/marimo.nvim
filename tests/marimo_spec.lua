@@ -1,3 +1,35 @@
+local snacks_image_calls = {
+	new = {},
+	closed = 0,
+}
+
+local function reset_snacks_image_calls()
+	snacks_image_calls.new = {}
+	snacks_image_calls.closed = 0
+end
+
+package.preload["snacks.image"] = function()
+	return {
+		supports_terminal = function()
+			return true
+		end,
+		placement = {
+			new = function(bufnr, src, opts)
+				local placement = {}
+				function placement:close()
+					snacks_image_calls.closed = snacks_image_calls.closed + 1
+				end
+				table.insert(snacks_image_calls.new, {
+					bufnr = bufnr,
+					src = src,
+					opts = vim.deepcopy(opts),
+				})
+				return placement
+			end,
+		},
+	}
+end
+
 local marimo = require("marimo")
 local private = marimo._private
 
@@ -212,6 +244,75 @@ local function test_deactivation_clears_render_extmarks()
 	vim.cmd("Marimo")
 	assert_truthy(not vim.b.marimo_projected)
 	assert_eq(#vim.api.nvim_buf_get_extmarks(0, -1, 0, -1, {}), 0)
+end
+
+local function test_runtime_image_outputs_use_snacks_image()
+	local path = make_path("runtime_image.py")
+	reset_snacks_image_calls()
+	write_file(
+		path,
+		'# + {marimo}\n\nimport marimo as mo\nmo.image(src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wn9lD8AAAAASUVORK5CYII=")'
+	)
+	edit(path)
+
+	vim.cmd("Marimo on")
+	vim.cmd("MarimoRunAll")
+	wait_for_truthy(function()
+		return #snacks_image_calls.new > 0
+	end, "timed out waiting for runtime image placement")
+
+	local call = snacks_image_calls.new[#snacks_image_calls.new]
+	assert_truthy(call.bufnr == 0 or call.bufnr == vim.api.nvim_get_current_buf(), "expected current-buffer placement")
+	assert_truthy(call.opts.inline)
+	assert_eq(call.opts.pos[1], 4)
+	assert_truthy(call.src:match("%.png$") ~= nil, "expected cached png path")
+	assert_truthy(vim.fn.filereadable(call.src) == 1, "expected cached image file to exist")
+end
+
+local function test_stringified_image_bundle_outputs_use_snacks_image()
+	local render = dofile(vim.fn.getcwd() .. "/lua/marimo/render.lua")
+	local path = make_path("stringified_image_bundle.py")
+	reset_snacks_image_calls()
+	write_file(path, "# + {marimo}\n\nx = 1")
+	edit(path)
+
+	render.render(0, {
+		{
+			id = "cell-1",
+			projection_range = { start_line = 1, end_line = 3 },
+			runtime = {
+				output = {
+					mimetype = "text/plain",
+					data = '{"image/png":"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wn9lD8AAAAASUVORK5CYII="}',
+				},
+				console = {},
+			},
+		},
+	})
+
+	assert_truthy(#snacks_image_calls.new > 0, "expected image placement for stringified mimebundle")
+	local call = snacks_image_calls.new[#snacks_image_calls.new]
+	assert_truthy(call.src:match("%.png$") ~= nil, "expected cached png path")
+	assert_truthy(vim.fn.filereadable(call.src) == 1, "expected cached image file to exist")
+end
+
+local function test_deactivation_clears_runtime_image_placements()
+	local path = make_path("runtime_image_cleanup.py")
+	reset_snacks_image_calls()
+	write_file(
+		path,
+		'# + {marimo}\n\nimport marimo as mo\nmo.image(src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wn9lD8AAAAASUVORK5CYII=")'
+	)
+	edit(path)
+
+	vim.cmd("Marimo on")
+	vim.cmd("MarimoRunAll")
+	wait_for_truthy(function()
+		return #snacks_image_calls.new > 0
+	end, "timed out waiting for runtime image placement")
+
+	vim.cmd("Marimo")
+	assert_truthy(snacks_image_calls.closed > 0, "expected image placements to close on deactivation")
 end
 
 local function test_failed_deactivation_keeps_worker_session_alive()
@@ -583,6 +684,8 @@ local tests = {
 	test_navigation_keymap_callbacks_work,
 	test_jump_next_cell_appends_new_cell_and_enters_insert_mode,
 	test_runtime_outputs_render_below_cells,
+	test_runtime_image_outputs_use_snacks_image,
+	test_stringified_image_bundle_outputs_use_snacks_image,
 	test_write_does_not_block_while_runtime_is_running,
 	test_run_all_shows_per_cell_running_placeholders,
 	test_new_cell_autorun_streams_runtime_updates,
@@ -593,6 +696,7 @@ local tests = {
 	test_runtime_errors_include_descriptive_stderr_context,
 	test_runtime_errors_show_multiple_definition_details,
 	test_run_current_cell_command_refreshes_output,
+	test_deactivation_clears_runtime_image_placements,
 	test_interrupt_clears_running_placeholder,
 }
 
