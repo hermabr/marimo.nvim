@@ -25,12 +25,12 @@ function M.clear_projected_state(bufnr)
 	vim.b[bufnr].marimo_last_saved_source_hash = nil
 end
 
-function M.mark_projected(bufnr, ensure_write_autocmd)
+function M.mark_projected(bufnr, ensure_projected_buffer_setup)
 	bufnr = bufnr or vim.api.nvim_get_current_buf()
 	vim.b[bufnr].marimo_projected = true
 	vim.b[bufnr].marimo_header = vim.b[bufnr].marimo_header or nil
 	vim.b[bufnr].marimo_app_options = util.as_json_object(vim.b[bufnr].marimo_app_options or {})
-	ensure_write_autocmd(bufnr)
+	ensure_projected_buffer_setup(bufnr)
 end
 
 return M

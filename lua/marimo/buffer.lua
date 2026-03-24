@@ -56,9 +56,8 @@ local function open_with_worker(bufnr, input_kind, opts)
 		return false
 	end
 	set_projected_buffer(bufnr, payload, keep_modified)
-	opts.ensure_write_autocmd(bufnr)
-	if opts.ensure_sync_autocmd then
-		opts.ensure_sync_autocmd(bufnr)
+	if opts.ensure_projected_buffer_setup then
+		opts.ensure_projected_buffer_setup(bufnr)
 	end
 	return true
 end

@@ -6,10 +6,17 @@ local state = dofile(dir .. "/state.lua")
 local buffer = dofile(dir .. "/buffer.lua")
 local commands = dofile(dir .. "/commands.lua")
 local worker = dofile(dir .. "/worker.lua")
+local navigation = dofile(dir .. "/navigation.lua")
 
 local M = {}
 
 local group = vim.api.nvim_create_augroup("marimo.nvim", { clear = true })
+local setup_opts = {
+	keymaps = {
+		prev_cell = "[m",
+		next_cell = "]m",
+	},
+}
 
 local function ensure_write_autocmd(bufnr)
 	if vim.b[bufnr].marimo_write_hook then
@@ -41,10 +48,35 @@ local function ensure_sync_autocmd(bufnr)
 	vim.b[bufnr].marimo_sync_hook = true
 end
 
+local function ensure_navigation_keymaps(bufnr)
+	if vim.b[bufnr].marimo_navigation_keymaps then
+		return
+	end
+
+	local keymaps = setup_opts.keymaps or {}
+	if keymaps.prev_cell then
+		vim.keymap.set("n", keymaps.prev_cell, function()
+			M.jump_prev_cell(bufnr)
+		end, { buffer = bufnr, silent = true, desc = "Marimo: previous cell" })
+	end
+	if keymaps.next_cell then
+		vim.keymap.set("n", keymaps.next_cell, function()
+			M.jump_next_cell(bufnr)
+		end, { buffer = bufnr, silent = true, desc = "Marimo: next cell" })
+	end
+
+	vim.b[bufnr].marimo_navigation_keymaps = true
+end
+
+local function ensure_projected_buffer_setup(bufnr)
+	ensure_write_autocmd(bufnr)
+	ensure_sync_autocmd(bufnr)
+	ensure_navigation_keymaps(bufnr)
+end
+
 M.project_buffer = function(bufnr, opts)
 	opts = opts or {}
-	opts.ensure_write_autocmd = opts.ensure_write_autocmd or ensure_write_autocmd
-	opts.ensure_sync_autocmd = opts.ensure_sync_autocmd or ensure_sync_autocmd
+	opts.ensure_projected_buffer_setup = opts.ensure_projected_buffer_setup or ensure_projected_buffer_setup
 	return buffer.project_buffer(bufnr, opts)
 end
 
@@ -52,28 +84,32 @@ M.write_buffer = buffer.write_buffer
 M.sync_buffer = buffer.sync_buffer
 
 M.mark_projected = function(bufnr)
-	return state.mark_projected(bufnr, ensure_write_autocmd)
+	return state.mark_projected(bufnr, ensure_projected_buffer_setup)
 end
 
 M.activate = function(bufnr, opts)
 	opts = opts or {}
-	opts.ensure_write_autocmd = opts.ensure_write_autocmd or ensure_write_autocmd
-	opts.ensure_sync_autocmd = opts.ensure_sync_autocmd or ensure_sync_autocmd
+	opts.ensure_projected_buffer_setup = opts.ensure_projected_buffer_setup or ensure_projected_buffer_setup
 	return buffer.activate(bufnr, opts)
 end
 
 M.set_mode = function(enabled, opts)
 	opts = opts or {}
-	opts.ensure_write_autocmd = opts.ensure_write_autocmd or ensure_write_autocmd
-	opts.ensure_sync_autocmd = opts.ensure_sync_autocmd or ensure_sync_autocmd
+	opts.ensure_projected_buffer_setup = opts.ensure_projected_buffer_setup or ensure_projected_buffer_setup
 	return buffer.set_mode(enabled, opts)
 end
 
-function M.setup()
+M.normalize_buffer = navigation.normalize_buffer
+M.jump_prev_cell = navigation.jump_prev_cell
+M.jump_next_cell = navigation.jump_next_cell
+
+function M.setup(opts)
+	opts = opts or {}
+	setup_opts = vim.tbl_deep_extend("force", setup_opts, opts)
 	commands.setup({
 		group = group,
 		api = M,
-		ensure_write_autocmd = ensure_write_autocmd,
+		ensure_projected_buffer_setup = ensure_projected_buffer_setup,
 	})
 	vim.api.nvim_create_autocmd("VimLeavePre", {
 		group = group,
@@ -90,6 +126,8 @@ M._private = {
 	as_json_object = util.as_json_object,
 	promote_first_marker_to_marimo = markers.promote_first_marker_to_marimo,
 	find_project_root = worker._private.find_project_root,
+	find_cell_start_rows = navigation.find_cell_start_rows,
+	first_content_row_after_marker = navigation.first_content_row_after_marker,
 }
 
 return M

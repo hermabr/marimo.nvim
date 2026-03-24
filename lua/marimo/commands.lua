@@ -19,7 +19,7 @@ function M.setup(opts)
 			end
 			local lines = vim.api.nvim_buf_get_lines(args.buf, 0, -1, false)
 			if markers.looks_like_marimo(lines) then
-				api.project_buffer(args.buf, { ensure_write_autocmd = opts.ensure_write_autocmd })
+				api.project_buffer(args.buf, { ensure_projected_buffer_setup = opts.ensure_projected_buffer_setup })
 			end
 		end,
 	})
@@ -44,8 +44,8 @@ function M.setup(opts)
 
 		local ok, err = api.set_mode(enabled, {
 			bufnr = 0,
-			ensure_write_autocmd = opts.ensure_write_autocmd,
 			manual = true,
+			ensure_projected_buffer_setup = opts.ensure_projected_buffer_setup,
 		})
 		if not ok then
 			util.notify(err, vim.log.levels.WARN)
@@ -59,6 +59,21 @@ function M.setup(opts)
 			return { "on", "off", "toggle" }
 		end,
 	})
+
+	vim.api.nvim_create_user_command("MarimoCellPrev", function()
+		api.jump_prev_cell(0)
+	end, {})
+
+	vim.api.nvim_create_user_command("MarimoCellNext", function()
+		api.jump_next_cell(0)
+	end, {})
+
+	vim.api.nvim_create_user_command("MarimoNormalize", function()
+		local _, err = api.normalize_buffer(0)
+		if err then
+			util.notify(err, vim.log.levels.WARN)
+		end
+	end, {})
 end
 
 return M
