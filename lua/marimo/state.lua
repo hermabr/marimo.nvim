@@ -20,6 +20,8 @@ function M.clear_projected_state(bufnr)
 	vim.b[bufnr].marimo_header = nil
 	vim.b[bufnr].marimo_app_options = nil
 	vim.b[bufnr].marimo_cells = nil
+	vim.b[bufnr].marimo_runtime_cells = nil
+	vim.b[bufnr].marimo_runtime_enabled = nil
 	vim.b[bufnr].marimo_projection_map = nil
 	vim.b[bufnr].marimo_canonical_source = nil
 	vim.b[bufnr].marimo_last_saved_source_hash = nil

@@ -68,6 +68,18 @@ function M.setup(opts)
 		api.jump_next_cell(0)
 	end, {})
 
+	vim.api.nvim_create_user_command("MarimoRunCell", function()
+		api.run_current_cell(0)
+	end, {})
+
+	vim.api.nvim_create_user_command("MarimoRunAll", function()
+		api.run_all_cells(0)
+	end, {})
+
+	vim.api.nvim_create_user_command("MarimoInterrupt", function()
+		api.interrupt(0)
+	end, {})
+
 	vim.api.nvim_create_user_command("MarimoNormalize", function()
 		local _, err = api.normalize_buffer(0)
 		if err then

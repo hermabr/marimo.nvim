@@ -165,4 +165,35 @@ function M.jump_next_cell(bufnr)
 	vim.cmd("startinsert")
 end
 
+function M.find_cell_index(cells, row)
+	for idx, cell in ipairs(cells or {}) do
+		local range = cell.projection_range or {}
+		local start_row = range.start_line or 1
+		local end_row = range.end_line or start_row
+		if row >= start_row and row <= end_row then
+			return idx
+		end
+	end
+	return nil
+end
+
+function M.find_cell_by_row(cells, row)
+	local idx = M.find_cell_index(cells, row)
+	if idx == nil then
+		return nil, nil
+	end
+	return cells[idx], idx
+end
+
+function M.find_current_cell(bufnr)
+	bufnr = bufnr or vim.api.nvim_get_current_buf()
+	local row = vim.api.nvim_win_get_cursor(0)[1]
+	return M.find_cell_by_row(vim.b[bufnr].marimo_cells or {}, row)
+end
+
+function M.cell_end_row(cell)
+	local range = (cell or {}).projection_range or {}
+	return math.max(range.end_line or range.start_line or 1, 1)
+end
+
 return M

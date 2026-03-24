@@ -41,7 +41,7 @@ local function ensure_sync_autocmd(bufnr)
 		buffer = bufnr,
 		callback = function(args)
 			if vim.b[args.buf].marimo_projected then
-				M.sync_buffer(args.buf)
+				buffer.schedule_sync(args.buf, { immediate = args.event == "InsertLeave" })
 			end
 		end,
 	})
@@ -82,6 +82,9 @@ end
 
 M.write_buffer = buffer.write_buffer
 M.sync_buffer = buffer.sync_buffer
+M.run_current_cell = buffer.run_current_cell
+M.run_all_cells = buffer.run_all_cells
+M.interrupt = buffer.interrupt
 
 M.mark_projected = function(bufnr)
 	return state.mark_projected(bufnr, ensure_projected_buffer_setup)
