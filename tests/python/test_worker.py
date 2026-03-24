@@ -286,6 +286,41 @@ def test_run_cells_only_runs_selected_cell_and_its_ancestors(tmp_path: Path) -> 
     worker.shutdown({})
 
 
+def test_run_cells_does_not_rerun_non_stale_ancestors_after_bootstrap(tmp_path: Path) -> None:
+    worker = Worker()
+    path = tmp_path / "runtime_ancestor_rerun.py"
+    initial = worker.open_session(
+        {
+            "path": str(path),
+            "content": (
+                "# + {marimo}\n\nimport time\n"
+                "counts = {'base': 0, 'mid': 0, 'leaf': 0}\n\n"
+                "def f(x, key):\n"
+                "    for i in range(x):\n"
+                "        print(i)\n"
+                "        time.sleep(0.01)\n"
+                "    counts[key] += 1\n"
+                "    return counts[key]\n\n"
+                "# +\n\nmid = f(2, 'mid')\nmid\n\n"
+                "# +\n\nleaf = mid + f(2, 'leaf')\nleaf"
+            ),
+            "input_kind": "projected",
+            "project_root": str(tmp_path),
+            "runtime_kind": "uv_project",
+        }
+    )
+    leaf_id = initial["cells"][2]["id"]
+
+    first = worker.run_cells({"session_id": initial["session_id"], "cell_ids": [leaf_id]})
+    assert first["cells"][1]["runtime"]["output_lines"] == ["1"]
+    assert first["cells"][2]["runtime"]["output_lines"] == ["2"]
+
+    second = worker.run_cells({"session_id": initial["session_id"], "cell_ids": [leaf_id]})
+    assert second["cells"][1]["runtime"]["output_lines"] == ["1"]
+    assert second["cells"][2]["runtime"]["output_lines"] == ["3"]
+    worker.shutdown({})
+
+
 def test_sync_and_run_updates_descendant_outputs(tmp_path: Path) -> None:
     worker = Worker()
     path = tmp_path / "reactive.py"
@@ -384,6 +419,40 @@ def test_run_cells_emits_incremental_runtime_updates(tmp_path: Path) -> None:
         and cast(dict[str, dict[str, object]], cast(dict[str, object], event["payload"])["runtime_cells"]).get(second_cell_id, {}).get("status")
         in {"queued", "running"}
         for event in runtime_events
+    )
+    worker.shutdown({})
+
+
+def test_sync_and_run_emits_session_update_for_new_cells(tmp_path: Path) -> None:
+    events: list[dict[str, object]] = []
+    worker = Worker(event_sink=events.append)
+    path = tmp_path / "runtime_new_cell_stream.py"
+    initial = worker.open_session(
+        {
+            "path": str(path),
+            "content": "# + {marimo}\n\nx = 1\nx",
+            "input_kind": "projected",
+            "project_root": str(tmp_path),
+            "runtime_kind": "uv_project",
+        }
+    )
+
+    updated = worker.sync_and_run(
+        {
+            "session_id": initial["session_id"],
+            "content": "# + {marimo}\n\nx = 1\nx\n\n# +\n\nimport time\ntime.sleep(2.0)\ny = x + 1\ny",
+            "_request_id": 99,
+        }
+    )
+
+    assert len(updated["cells"]) == 2
+    session_events = [event for event in events if event.get("event") == "session_update"]
+    assert session_events
+    assert any(
+        event.get("request_id") == 99
+        and isinstance(event.get("payload"), dict)
+        and len(cast(list[dict[str, object]], cast(dict[str, object], event["payload"])["cells"])) == 2
+        for event in session_events
     )
     worker.shutdown({})
 

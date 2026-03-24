@@ -525,6 +525,9 @@ class Worker:
             },
         )
 
+    def _emit_session_update(self, session: Session, request_id: int | None) -> None:
+        self._emit_event("session_update", request_id, self._with_runtime_payload(session))
+
     def _changed_runtime_cells(
         self,
         previous: dict[str, dict[str, Any]],
@@ -735,11 +738,13 @@ class Worker:
         deleted_ids = [cell["id"] for cell in previous_cells if cell["id"] not in current_ids]
         return changed_ids, deleted_ids
 
-    def _execution_closure(self, session: Session, requested_ids: list[str]) -> list[str]:
+    def _execution_closure(self, session: Session, requested_ids: list[str], include_ancestors: bool) -> list[str]:
         valid_ids = {cell["id"] for cell in session.cells}
         requested = {cell_id for cell_id in requested_ids if cell_id in valid_ids}
         if not requested:
             return []
+        if not include_ancestors:
+            return [cell["id"] for cell in session.cells if cell["id"] in requested]
         try:
             graph = DirectedGraph()
             for cell in session.cells:
@@ -781,6 +786,9 @@ class Worker:
                 )
             )
             if run_ids or delete_ids:
+                session.runtime_session.flush_messages()
+                self._refresh_runtime_cells(session)
+                self._emit_session_update(session, request_id)
                 self._wait_for_completion(session, previous_completed_runs, request_id=request_id)
             else:
                 session.runtime_session.flush_messages()
@@ -797,7 +805,15 @@ class Worker:
         if not requested_ids:
             return self._session_payload(session)
         code_by_id = {cell["id"]: cell["code"] for cell in session.cells}
-        runnable_ids = [cell_id for cell_id in self._execution_closure(session, requested_ids) if cell_id in code_by_id]
+        runnable_ids = [
+            cell_id
+            for cell_id in self._execution_closure(
+                session,
+                requested_ids,
+                include_ancestors=not session.runtime_bootstrapped,
+            )
+            if cell_id in code_by_id
+        ]
         if not runnable_ids:
             return self._session_payload(session)
         previous_completed_runs = session.runtime_consumer.completed_runs if session.runtime_consumer else 0

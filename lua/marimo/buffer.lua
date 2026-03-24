@@ -119,11 +119,18 @@ local function handle_async_runtime_event(bufnr, request_id, event)
 	if request_id and state_for(bufnr).request_id ~= request_id then
 		return
 	end
-	if type(event) ~= "table" or event.event ~= "runtime_update" then
+	if type(event) ~= "table" then
 		return
 	end
-	local payload = event.payload or {}
-	merge_runtime_cells(bufnr, payload.runtime_cells or {})
+	if event.event == "runtime_update" then
+		local payload = event.payload or {}
+		merge_runtime_cells(bufnr, payload.runtime_cells or {})
+		return
+	end
+	if event.event == "session_update" then
+		local payload = event.payload or {}
+		apply_projection_payload(bufnr, payload, true)
+	end
 end
 
 function M.reload_raw_buffer(bufnr)

@@ -428,6 +428,30 @@ local function test_run_all_shows_per_cell_running_placeholders()
 	wait_for_match(" 2", 5000)
 end
 
+local function test_new_cell_autorun_streams_runtime_updates()
+	local path = make_path("runtime_new_cell.py")
+	write_file(path, "# + {marimo}\n\nx = 1\nx")
+	edit(path)
+
+	vim.cmd("Marimo on")
+	vim.api.nvim_buf_set_lines(0, -1, -1, false, {
+		"",
+		"# +",
+		"",
+		"import time",
+		"time.sleep(2.0)",
+		"y = x + 1",
+		"y",
+	})
+	vim.api.nvim_exec_autocmds("TextChanged", { buffer = 0, modeline = false })
+
+	wait_for_truthy(function()
+		local lines = table.concat(rendered_lines(), "\n")
+		return lines:match("marimo queued") ~= nil or lines:match("marimo running") ~= nil
+	end, "timed out waiting for new cell runtime placeholder")
+	wait_for_match(" 2", 5000)
+end
+
 local function test_opening_without_running_does_not_render_idle_placeholders()
 	local path = make_path("runtime_idle_hidden.py")
 	write_file(path, "# + {marimo}\n\nx = 1\nx")
@@ -543,6 +567,7 @@ local tests = {
 	test_runtime_outputs_render_below_cells,
 	test_write_does_not_block_while_runtime_is_running,
 	test_run_all_shows_per_cell_running_placeholders,
+	test_new_cell_autorun_streams_runtime_updates,
 	test_opening_without_running_does_not_render_idle_placeholders,
 	test_sync_buffer_updates_reactive_outputs,
 	test_runtime_outputs_include_stdout,
