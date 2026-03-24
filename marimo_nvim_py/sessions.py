@@ -3,14 +3,10 @@ from __future__ import annotations
 import asyncio
 import ast
 import contextlib
-import contextvars
 import hashlib
 import html
-import io
 import json
-import logging
 import os
-import threading
 import re
 import time
 import uuid
@@ -23,20 +19,17 @@ from marimo._ast.codegen import generate_filecontents_from_ir
 from marimo._ast.parse import parse_notebook
 from marimo._config.config import PartialMarimoConfig
 from marimo._config.manager import get_default_config_manager
-from marimo._messaging.cell_output import CellChannel, CellOutput
-from marimo._messaging.errors import Error
 from marimo._messaging.notification import CompletedRunNotification
 from marimo._messaging.serde import deserialize_kernel_message
 from marimo._runtime.commands import AppMetadata, ExecuteCellsCommand, SyncGraphCommand
-from marimo._runtime import executor as runtime_executor
 from marimo._schemas.serialization import AppInstantiation, CellDef, Header, NotebookSerializationV1
 from marimo._server.models.models import InstantiateNotebookRequest
 from marimo._session.consumer import SessionConsumer
 from marimo._session.model import ConnectionState, SessionMode
 from marimo._session.notebook.file_manager import AppFileManager
 from marimo._session.session import SessionImpl
+from marimo._session.state.serialize import serialize_session_view
 from marimo._types.ids import ConsumerId
-from marimo._utils.lists import as_list
 
 from marimo_nvim_py.models import Session
 from marimo_nvim_py.projected import (
@@ -49,55 +42,11 @@ from marimo_nvim_py.projected import (
 
 MAX_OUTPUT_LINES = 12
 MAX_OUTPUT_LINE_CHARS = 160
-MIMEBUNDLE_TYPE = "application/vnd.marimo+mimebundle"
-CURRENT_EXECUTING_CELL_ID: contextvars.ContextVar[str | None] = contextvars.ContextVar(
-    "marimo_nvim_current_executing_cell_id",
-    default=None,
-)
+TRACEBACK_MIMETYPE = "application/vnd.marimo+traceback"
 
 
 def sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
-
-
-def _install_execution_cell_tracking() -> None:
-    executor_cls = cast(Any, runtime_executor.DefaultExecutor)
-    if getattr(executor_cls, "_marimo_nvim_tracking_installed", False):
-        return
-
-    original_execute_cell = runtime_executor.DefaultExecutor.execute_cell
-    original_execute_cell_async = runtime_executor.DefaultExecutor.execute_cell_async
-
-    def execute_cell(
-        self: runtime_executor.DefaultExecutor,
-        cell: Any,
-        glbls: dict[str, Any],
-        graph: Any = None,
-    ) -> Any:
-        token = CURRENT_EXECUTING_CELL_ID.set(str(cell.cell_id))
-        try:
-            return original_execute_cell(self, cell, glbls, graph)
-        finally:
-            CURRENT_EXECUTING_CELL_ID.reset(token)
-
-    async def execute_cell_async(
-        self: runtime_executor.DefaultExecutor,
-        cell: Any,
-        glbls: dict[str, Any],
-        graph: Any = None,
-    ) -> Any:
-        token = CURRENT_EXECUTING_CELL_ID.set(str(cell.cell_id))
-        try:
-            return await original_execute_cell_async(self, cell, glbls, graph)
-        finally:
-            CURRENT_EXECUTING_CELL_ID.reset(token)
-
-    setattr(executor_cls, "execute_cell", execute_cell)
-    setattr(executor_cls, "execute_cell_async", execute_cell_async)
-    setattr(executor_cls, "_marimo_nvim_tracking_installed", True)
-
-
-_install_execution_cell_tracking()
 
 
 class RuntimeSessionConsumer(SessionConsumer):
@@ -162,25 +111,8 @@ def _split_text_output(data: str) -> list[str]:
     return _truncate_lines(data.splitlines())
 
 
-def _error_lines(errors: list[Error]) -> list[str]:
-    return _truncate_lines([error.describe() for error in errors])
-
-
-def _internal_error_id(line: str) -> str | None:
-    match = re.search(r"An internal error occurred:\s*([0-9a-f-]+)", line)
-    if match is None:
-        return None
-    return match.group(1)
-
-
-def _merge_unique_lines(existing: list[str], extra: list[str]) -> list[str]:
-    merged = list(existing)
-    seen = set(existing)
-    for line in extra:
-        if line not in seen:
-            merged.append(line)
-            seen.add(line)
-    return merged
+def _is_hidden_internal_error(message: str) -> bool:
+    return message.startswith("An internal error occurred:")
 
 
 def _collect_assigned_names(node: ast.AST) -> set[str]:
@@ -230,40 +162,6 @@ def _cell_defined_names(code: str) -> set[str]:
     except SyntaxError:
         return set()
     return _collect_assigned_names(tree)
-
-
-def _format_error_runtime(runtime: dict[str, Any]) -> dict[str, Any]:
-    if runtime.get("output_kind") != "error":
-        return runtime
-    formatted = dict(runtime)
-    output_lines = list(cast(list[str], formatted.get("output_lines") or []))
-    console_lines = [str(line).removeprefix("stderr: ") for line in cast(list[str], formatted.get("console_lines") or [])]
-    visible_output = [line for line in output_lines if _internal_error_id(line) is None]
-    if console_lines:
-        visible_output = _merge_unique_lines(visible_output, console_lines)
-    formatted["output_lines"] = _truncate_lines(visible_output)
-    formatted["console_lines"] = []
-    formatted["has_console"] = False
-    return formatted
-
-
-def _format_runtime_cells(runtime_cells: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    return {cell_id: _format_error_runtime(dict(runtime)) for cell_id, runtime in runtime_cells.items()}
-
-
-def _has_visible_error_details(runtime: dict[str, Any]) -> bool:
-    if runtime.get("output_kind") != "error":
-        return False
-    return bool(runtime.get("output_lines") or runtime.get("console_lines"))
-
-
-def _normalize_console_snapshot(captured_console: dict[str, list[str]] | None) -> dict[str, list[str]]:
-    normalized: dict[str, list[str]] = {}
-    for cell_id, lines in (captured_console or {}).items():
-        trimmed = _truncate_lines(lines)
-        if trimmed:
-            normalized[cell_id] = trimmed
-    return normalized
 
 
 def _multiple_definition_details(cells: list[dict[str, Any]]) -> dict[str, list[str]]:
@@ -316,89 +214,95 @@ def _html_to_text(data: str) -> list[str]:
     return _truncate_lines(lines)
 
 
-def _normalize_output(output: CellOutput | None) -> dict[str, Any]:
+def _normalize_serialized_error_output(output: dict[str, Any]) -> dict[str, Any]:
+    runtime: dict[str, Any] = {
+        "output_kind": "error",
+        "output_lines": [],
+        "output_summary": None,
+        "run_result_status": "marimo-error",
+    }
+    traceback = [str(line) for line in output.get("traceback", []) if str(line) != ""]
+    if traceback:
+        runtime["output_lines"] = _truncate_lines(traceback)
+        return runtime
+    evalue = str(output.get("evalue") or "")
+    ename = str(output.get("ename") or "")
+    if evalue != "" and not _is_hidden_internal_error(evalue):
+        runtime["output_lines"] = _truncate_lines([evalue])
+    elif ename != "" and ename != "internal":
+        runtime["output_lines"] = _truncate_lines([ename])
+    return runtime
+
+
+def _normalize_serialized_data_output(output: dict[str, Any]) -> dict[str, Any]:
     runtime: dict[str, Any] = {
         "output_kind": "empty",
         "output_lines": [],
         "output_summary": None,
         "run_result_status": None,
     }
-    if output is None:
+    data = cast(dict[str, Any], output.get("data") or {})
+    if not data:
         return runtime
-
-    if output.channel == CellChannel.MARIMO_ERROR and isinstance(output.data, list):
-        runtime["output_kind"] = "error"
-        runtime["run_result_status"] = "marimo-error"
-        runtime["output_lines"] = _error_lines(output.data)
-        return runtime
-
-    if output.mimetype == "text/plain" and isinstance(output.data, str):
-        lines = _split_text_output(output.data)
+    if isinstance(data.get("text/plain"), str):
+        lines = _split_text_output(cast(str, data["text/plain"]))
         runtime["output_kind"] = "text" if lines else "empty"
         runtime["output_lines"] = lines
         return runtime
-
-    if output.mimetype == MIMEBUNDLE_TYPE and isinstance(output.data, dict):
-        mimebundle = output.data
-        if isinstance(mimebundle.get("text/plain"), str):
-            lines = _split_text_output(mimebundle["text/plain"])
-            runtime["output_kind"] = "text" if lines else "empty"
-            runtime["output_lines"] = lines
-            return runtime
-        if "text/html" in mimebundle:
-            lines = _html_to_text(cast(str, mimebundle["text/html"]))
-            if lines:
-                runtime["output_kind"] = "text"
-                runtime["output_lines"] = lines
-            else:
-                kind, summary = _placeholder("html", "text/html")
-                runtime["output_kind"] = kind
-                runtime["output_summary"] = summary
-            return runtime
-        for mimetype in mimebundle:
-            if mimetype.startswith("image/"):
-                kind, summary = _placeholder("media", mimetype)
-                runtime["output_kind"] = kind
-                runtime["output_summary"] = summary
-                return runtime
-        kind, summary = _placeholder("widget", output.mimetype)
-        runtime["output_kind"] = kind
-        runtime["output_summary"] = summary
-        return runtime
-
-    if output.mimetype in {"text/html", "text/markdown"}:
-        lines = _html_to_text(output.data) if isinstance(output.data, str) else []
+    if isinstance(data.get("text/html"), str):
+        lines = _html_to_text(cast(str, data["text/html"]))
         if lines:
             runtime["output_kind"] = "text"
             runtime["output_lines"] = lines
         else:
-            kind, summary = _placeholder("html", output.mimetype)
+            kind, summary = _placeholder("html", "text/html")
             runtime["output_kind"] = kind
             runtime["output_summary"] = summary
         return runtime
-
-    if output.channel == CellChannel.MEDIA or output.mimetype.startswith("image/"):
-        kind, summary = _placeholder("media", output.mimetype)
-        runtime["output_kind"] = kind
-        runtime["output_summary"] = summary
-        return runtime
-
-    kind, summary = _placeholder("widget", output.mimetype)
-    runtime["output_kind"] = kind
-    runtime["output_summary"] = summary
+    for mimetype in data:
+        if mimetype.startswith("image/"):
+            kind, summary = _placeholder("media", mimetype)
+            runtime["output_kind"] = kind
+            runtime["output_summary"] = summary
+            return runtime
+    runtime["output_kind"], runtime["output_summary"] = _placeholder("widget", "application/vnd.marimo+mimebundle")
     return runtime
 
 
-def _normalize_console(console: Any) -> list[str]:
+def _normalize_serialized_outputs(outputs: list[dict[str, Any]]) -> dict[str, Any]:
+    if not outputs:
+        return {
+            "output_kind": "empty",
+            "output_lines": [],
+            "output_summary": None,
+            "run_result_status": None,
+        }
+    first = outputs[0]
+    if first.get("type") == "error":
+        return _normalize_serialized_error_output(first)
+    if first.get("type") == "data":
+        return _normalize_serialized_data_output(first)
+    return {
+        "output_kind": "empty",
+        "output_lines": [],
+        "output_summary": None,
+        "run_result_status": None,
+    }
+
+
+def _normalize_serialized_console(console: list[dict[str, Any]]) -> list[str]:
     lines: list[str] = []
-    for output in as_list(console):
-        if not isinstance(output, CellOutput):
+    for output in console:
+        if output.get("type") == "streamMedia":
+            mimetype = str(output.get("mimetype") or "media")
+            lines.append(f"[{mimetype} output]")
             continue
-        if not isinstance(output.data, str):
+        text = output.get("text")
+        if not isinstance(text, str):
             continue
-        prefix = "stderr: " if output.channel == CellChannel.STDERR else ""
-        for line in output.data.splitlines():
-            lines.append(prefix + line if prefix else line)
+        mimetype = output.get("mimetype")
+        chunk_lines = _html_to_text(text) if mimetype in {"text/html", TRACEBACK_MIMETYPE} else text.splitlines()
+        lines.extend(chunk_lines)
     return _truncate_lines(lines)
 
 
@@ -415,130 +319,6 @@ def _runtime_defaults() -> dict[str, Any]:
         "last_run_timestamp": None,
         "last_execution_time_ms": None,
     }
-
-
-class _ConsoleCapture:
-    def __init__(self, current_cell_id: Callable[[], str | None], fallback_cell_ids: list[str] | None = None) -> None:
-        self._current_cell_id = current_cell_id
-        self._fallback_cell_ids = list(fallback_cell_ids or [])
-        self._lines: dict[str, list[str]] = {}
-        self._partials: dict[str, str] = {}
-        self._pending_lines: list[str] = []
-        self._pending_partial = ""
-        self._lock = threading.Lock()
-
-    def _target_cell_id(self) -> str | None:
-        return self._current_cell_id()
-
-    def _append(self, target: str | None, text: str) -> None:
-        if text == "":
-            return
-        if target is None:
-            partial = self._pending_partial
-        else:
-            partial = self._partials.get(target, "")
-        chunks = text.split("\n")
-        chunks[0] = partial + chunks[0]
-        complete = chunks[:-1]
-        if target is None:
-            self._pending_partial = chunks[-1]
-        else:
-            self._partials[target] = chunks[-1]
-        if complete:
-            if target is None:
-                self._pending_lines.extend(complete)
-            else:
-                self._lines.setdefault(target, []).extend(complete)
-
-    def bind(self, cell_id: str | None) -> None:
-        if cell_id is None:
-            return
-        with self._lock:
-            if self._pending_lines:
-                self._lines.setdefault(cell_id, []).extend(self._pending_lines)
-                self._pending_lines = []
-            if self._pending_partial != "":
-                self._partials[cell_id] = self._partials.get(cell_id, "") + self._pending_partial
-                self._pending_partial = ""
-
-    def stdout_writer(self) -> Any:
-        capture = self
-
-        class _Writer:
-            def write(self, text: str) -> int:
-                with capture._lock:
-                    capture._append(capture._target_cell_id(), text)
-                return len(text)
-
-            def flush(self) -> None:
-                return None
-
-        return _Writer()
-
-    def stderr_writer(self) -> Any:
-        capture = self
-
-        class _Writer:
-            def write(self, text: str) -> int:
-                with capture._lock:
-                    lines = text.split("\n")
-                    prefixed = "\n".join(("stderr: " + line) if line else "stderr: " for line in lines)
-                    capture._append(capture._target_cell_id(), prefixed)
-                return len(text)
-
-            def flush(self) -> None:
-                return None
-
-        return _Writer()
-
-    def snapshot(self) -> dict[str, list[str]]:
-        with self._lock:
-            if (self._pending_lines or self._pending_partial != "") and self._fallback_cell_ids:
-                fallback = self._fallback_cell_ids[-1]
-                if self._pending_lines:
-                    self._lines.setdefault(fallback, []).extend(self._pending_lines)
-                    self._pending_lines = []
-                if self._pending_partial != "":
-                    self._partials[fallback] = self._partials.get(fallback, "") + self._pending_partial
-                    self._pending_partial = ""
-            snapshot = {cell_id: list(lines) for cell_id, lines in self._lines.items()}
-            for cell_id, partial in self._partials.items():
-                if partial != "":
-                    snapshot.setdefault(cell_id, []).append(partial)
-        return snapshot
-
-
-class _RuntimeLogCapture(logging.Handler):
-    def __init__(self) -> None:
-        super().__init__(level=logging.ERROR)
-        self._error_details: dict[str, list[str]] = {}
-        self._lock = threading.Lock()
-
-    def emit(self, record: logging.LogRecord) -> None:
-        message = record.getMessage()
-        if "error_id=" not in message:
-            return
-        lines = message.splitlines()
-        if not lines:
-            return
-        error_id, first_line = self._parse_header(lines[0])
-        if error_id is None:
-            return
-        captured = [line for line in [first_line, *lines[1:]] if line != ""]
-        if not captured:
-            return
-        with self._lock:
-            self._error_details[error_id] = captured
-
-    def snapshot(self) -> dict[str, list[str]]:
-        with self._lock:
-            return {error_id: list(lines) for error_id, lines in self._error_details.items()}
-
-    def _parse_header(self, line: str) -> tuple[str | None, str]:
-        match = re.search(r"error_id=([0-9a-f-]+)\)\s*(.*)$", line)
-        if match is None:
-            return None, line
-        return match.group(1), match.group(2)
 
 
 class Worker:
@@ -753,84 +533,29 @@ class Worker:
                 changed[cell_id] = runtime
         return changed
 
-    def _merge_captured_console(
-        self,
-        runtime_cells: dict[str, dict[str, Any]],
-        captured_console: dict[str, list[str]] | None,
-    ) -> dict[str, dict[str, Any]]:
-        if not captured_console:
-            return runtime_cells
-        merged = {cell_id: dict(runtime) for cell_id, runtime in runtime_cells.items()}
-        for cell_id, lines in captured_console.items():
-            if not lines:
-                continue
-            runtime = dict(merged.get(cell_id, _runtime_defaults()))
-            runtime["console_lines"] = _truncate_lines(lines)
+    def _serialized_runtime_cells(self, session: Session) -> dict[str, dict[str, Any]]:
+        if session.runtime_session is None:
+            return {}
+        view = session.runtime_session.session_view
+        serialized = serialize_session_view(view, cell_ids=[cell["id"] for cell in session.cells])
+        serialized_by_id = {cell["id"]: cell for cell in serialized["cells"]}
+        runtime_cells: dict[str, dict[str, Any]] = {}
+        for cell in session.cells:
+            cell_id = cell["id"]
+            runtime = _runtime_defaults()
+            serialized_cell = serialized_by_id.get(cell_id, {"outputs": [], "console": []})
+            runtime.update(_normalize_serialized_outputs(cast(list[dict[str, Any]], serialized_cell.get("outputs", []))))
+            runtime["console_lines"] = _normalize_serialized_console(cast(list[dict[str, Any]], serialized_cell.get("console", [])))
             runtime["has_console"] = bool(runtime["console_lines"])
-            merged[cell_id] = _format_error_runtime(runtime)
-        return merged
-
-    def _persist_console_lines(
-        self,
-        session: Session,
-        captured_console: dict[str, list[str]] | None,
-    ) -> None:
-        persisted = dict(session.persisted_console_lines or {})
-        for cell_id, lines in _normalize_console_snapshot(captured_console).items():
-            persisted[cell_id] = lines
-        session.persisted_console_lines = persisted
-
-    def _clear_persisted_console_lines(self, session: Session, cell_ids: list[str]) -> None:
-        if not session.persisted_console_lines:
-            return
-        persisted = dict(session.persisted_console_lines)
-        for cell_id in cell_ids:
-            persisted.pop(cell_id, None)
-        session.persisted_console_lines = persisted
-
-    def _merge_persisted_console_lines(
-        self,
-        session: Session,
-        runtime_cells: dict[str, dict[str, Any]],
-    ) -> dict[str, dict[str, Any]]:
-        persisted = session.persisted_console_lines or {}
-        if not persisted:
-            return runtime_cells
-        merged = {cell_id: dict(runtime) for cell_id, runtime in runtime_cells.items()}
-        for cell_id, lines in persisted.items():
-            runtime = dict(merged.get(cell_id, _runtime_defaults()))
-            if runtime.get("console_lines"):
-                continue
-            runtime["console_lines"] = list(lines)
-            runtime["has_console"] = bool(lines)
-            merged[cell_id] = _format_error_runtime(runtime)
-        return merged
-
-    def _merge_runtime_error_details(
-        self,
-        runtime_cells: dict[str, dict[str, Any]],
-        error_details: dict[str, list[str]] | None,
-    ) -> dict[str, dict[str, Any]]:
-        if not error_details:
-            return runtime_cells
-        merged = {cell_id: dict(runtime) for cell_id, runtime in runtime_cells.items()}
-        for cell_id, runtime in merged.items():
-            if runtime.get("output_kind") != "error":
-                continue
-            output_lines = list(cast(list[str], runtime.get("output_lines") or []))
-            error_id = None
-            for line in output_lines:
-                error_id = _internal_error_id(line)
-                if error_id is not None:
-                    break
-            if error_id is None:
-                continue
-            details = error_details.get(error_id) or []
-            if not details:
-                continue
-            runtime["output_lines"] = _truncate_lines(_merge_unique_lines(output_lines, details))
-            merged[cell_id] = _format_error_runtime(runtime)
-        return merged
+            notification = view.cell_notifications.get(cell_id)
+            if notification is not None:
+                runtime["status"] = notification.status
+                runtime["stale_inputs"] = bool(notification.stale_inputs)
+            execution_time = view.last_execution_time.get(cell_id)
+            if isinstance(execution_time, (int, float)) and runtime["status"] == "idle":
+                runtime["last_execution_time_ms"] = int(execution_time)
+            runtime_cells[cell_id] = runtime
+        return runtime_cells
 
     def _merge_multiple_definition_details(
         self,
@@ -848,45 +573,8 @@ class Worker:
             if runtime.get("output_lines") or runtime.get("console_lines"):
                 continue
             runtime["output_lines"] = _truncate_lines(lines)
-            merged[cell_id] = _format_error_runtime(runtime)
+            merged[cell_id] = runtime
         return merged
-
-    def _preserve_error_details(
-        self,
-        previous_runtime_cells: dict[str, dict[str, Any]],
-        runtime_cells: dict[str, dict[str, Any]],
-    ) -> dict[str, dict[str, Any]]:
-        if not previous_runtime_cells:
-            return runtime_cells
-        merged = {cell_id: dict(runtime) for cell_id, runtime in runtime_cells.items()}
-        for cell_id, runtime in merged.items():
-            previous = previous_runtime_cells.get(cell_id)
-            if previous is None:
-                continue
-            if not _has_visible_error_details(previous):
-                continue
-            if runtime.get("output_kind") != "error":
-                continue
-            if _has_visible_error_details(runtime):
-                continue
-            runtime["output_lines"] = list(cast(list[str], previous.get("output_lines") or []))
-            runtime["console_lines"] = list(cast(list[str], previous.get("console_lines") or []))
-            runtime["has_console"] = bool(runtime["console_lines"])
-            merged[cell_id] = _format_error_runtime(runtime)
-        return merged
-
-    def _current_running_cell_id(self, session: Session, preferred_ids: list[str] | None = None) -> str | None:
-        runtime_cells = session.runtime_cells or {}
-        search_ids = preferred_ids or [cell["id"] for cell in session.cells]
-        for cell_id in search_ids:
-            runtime = runtime_cells.get(cell_id) or {}
-            if runtime.get("status") == "running":
-                return cell_id
-        for cell_id in search_ids:
-            runtime = runtime_cells.get(cell_id) or {}
-            if runtime.get("status") == "queued":
-                return cell_id
-        return None
 
     def _wait_for_completion(
         self,
@@ -894,8 +582,6 @@ class Worker:
         previous_completed_runs: int,
         timeout: float = 15.0,
         request_id: int | None = None,
-        console_capture: _ConsoleCapture | None = None,
-        log_capture: _RuntimeLogCapture | None = None,
     ) -> None:
         if session.runtime_session is None or session.runtime_consumer is None:
             return
@@ -905,13 +591,6 @@ class Worker:
         while time.monotonic() < deadline:
             session.runtime_session.flush_messages()
             current_runtime = self._refresh_runtime_cells(session)
-            if console_capture is not None:
-                console_capture.bind(self._current_running_cell_id(session))
-                current_runtime = self._merge_captured_console(current_runtime, console_capture.snapshot())
-            if log_capture is not None:
-                current_runtime = self._merge_runtime_error_details(current_runtime, log_capture.snapshot())
-            current_runtime = self._merge_multiple_definition_details(session, current_runtime)
-            current_runtime = self._merge_persisted_console_lines(session, current_runtime)
             session.runtime_cells = current_runtime
             changed = self._changed_runtime_cells(last_emitted, current_runtime)
             if changed:
@@ -936,41 +615,17 @@ class Worker:
         raise TimeoutError("timed out waiting for marimo runtime to finish")
 
     def _refresh_runtime_cells(self, session: Session) -> dict[str, dict[str, Any]]:
-        runtime_cells: dict[str, dict[str, Any]] = {}
-        previous_runtime_cells = dict(session.runtime_cells or {})
         if session.runtime_session is None:
-            session.runtime_cells = runtime_cells
-            return runtime_cells
-        view = session.runtime_session.session_view
+            session.runtime_cells = {}
+            return {}
         session.runtime_session.flush_messages()
-        for cell in session.cells:
-            runtime = _runtime_defaults()
-            cell_id = cell["id"]
-            notification = view.cell_notifications.get(cell_id)
-            if notification is not None:
-                normalized = _normalize_output(notification.output)
-                runtime.update(normalized)
-                runtime["status"] = notification.status
-                runtime["stale_inputs"] = bool(notification.stale_inputs)
-                runtime["console_lines"] = _normalize_console(notification.console)
-                runtime["has_console"] = bool(runtime["console_lines"])
-                runtime = _format_error_runtime(runtime)
-            execution_time = view.last_execution_time.get(cell_id)
-            if isinstance(execution_time, (int, float)) and runtime["status"] == "idle":
-                runtime["last_execution_time_ms"] = int(execution_time)
-            runtime_cells[cell_id] = runtime
-        runtime_cells = _format_runtime_cells(runtime_cells)
-        runtime_cells = self._preserve_error_details(previous_runtime_cells, runtime_cells)
+        runtime_cells = self._serialized_runtime_cells(session)
         runtime_cells = self._merge_multiple_definition_details(session, runtime_cells)
-        runtime_cells = self._merge_persisted_console_lines(session, runtime_cells)
         session.runtime_cells = runtime_cells
         return runtime_cells
 
     def _perform_runtime_operation(self, operation: Any) -> Any:
-        stdout = io.StringIO()
-        stderr = io.StringIO()
-        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
-            return operation()
+        return operation()
 
     @contextlib.contextmanager
     def _session_cwd(self, session: Session) -> Any:
@@ -983,9 +638,7 @@ class Worker:
             os.chdir(original)
 
     def _with_runtime_payload(self, session: Session) -> dict[str, Any]:
-        runtime_cells = _format_runtime_cells(session.runtime_cells or {})
-        runtime_cells = self._merge_multiple_definition_details(session, runtime_cells)
-        runtime_cells = self._merge_persisted_console_lines(session, runtime_cells)
+        runtime_cells = self._merge_multiple_definition_details(session, session.runtime_cells or {})
         session.runtime_cells = runtime_cells
         cells = [{**cell, "runtime": runtime_cells.get(cell["id"], _runtime_defaults())} for cell in session.cells]
         return {
@@ -1041,7 +694,7 @@ class Worker:
             app_file_manager=file_manager,
             config_manager=config_manager,
             virtual_files_supported=False,
-            redirect_console_to_browser=False,
+            redirect_console_to_browser=True,
             ttl_seconds=None,
             auto_instantiate=True,
         )
@@ -1107,43 +760,11 @@ class Worker:
                 )
             )
             if run_ids or delete_ids:
-                self._clear_persisted_console_lines(session, list(run_ids) + list(delete_ids))
-                captured_console = _ConsoleCapture(
-                    current_cell_id=lambda: CURRENT_EXECUTING_CELL_ID.get()
-                    or self._current_running_cell_id(session, run_ids),
-                    fallback_cell_ids=run_ids,
-                )
-                captured_logs = _RuntimeLogCapture()
-                root_logger = logging.getLogger()
-                root_logger.addHandler(captured_logs)
-                try:
-                    with contextlib.redirect_stdout(captured_console.stdout_writer()), contextlib.redirect_stderr(
-                        captured_console.stderr_writer()
-                    ):
-                        self._wait_for_completion(
-                            session,
-                            previous_completed_runs,
-                            request_id=request_id,
-                            console_capture=captured_console,
-                            log_capture=captured_logs,
-                        )
-                finally:
-                    root_logger.removeHandler(captured_logs)
-                session.runtime_cells = self._merge_captured_console(
-                    session.runtime_cells or {}, captured_console.snapshot()
-                )
-                self._persist_console_lines(session, captured_console.snapshot())
-                session.runtime_cells = self._merge_runtime_error_details(
-                    session.runtime_cells or {}, captured_logs.snapshot()
-                )
+                self._wait_for_completion(session, previous_completed_runs, request_id=request_id)
             else:
-                self._perform_runtime_operation(lambda: session.runtime_session.flush_messages())
+                session.runtime_session.flush_messages()
         session.last_runtime_sync_hash = sha256_text(json.dumps({"cell_ids": cell_ids, "codes": codes}, sort_keys=True))
         self._refresh_runtime_cells(session)
-        if run_ids or delete_ids:
-            session.runtime_cells = self._merge_captured_console(session.runtime_cells or {}, captured_console.snapshot())
-            self._persist_console_lines(session, captured_console.snapshot())
-            session.runtime_cells = self._merge_runtime_error_details(session.runtime_cells or {}, captured_logs.snapshot())
         return self._with_runtime_payload(session)
 
     def run_cells(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -1162,7 +783,6 @@ class Worker:
             return self._session_payload(session)
         previous_completed_runs = session.runtime_consumer.completed_runs if session.runtime_consumer else 0
         request_id = cast(int | None, params.get("_request_id"))
-        self._clear_persisted_console_lines(session, runnable_ids)
         with self._session_cwd(session):
             self._perform_runtime_operation(
                 lambda: session.runtime_session.put_control_request(
@@ -1170,32 +790,9 @@ class Worker:
                     from_consumer_id=None,
                 )
             )
-            captured_console = _ConsoleCapture(
-                current_cell_id=lambda: CURRENT_EXECUTING_CELL_ID.get()
-                or self._current_running_cell_id(session, runnable_ids),
-                fallback_cell_ids=runnable_ids,
-            )
-            captured_logs = _RuntimeLogCapture()
-            root_logger = logging.getLogger()
-            root_logger.addHandler(captured_logs)
-            try:
-                with contextlib.redirect_stdout(captured_console.stdout_writer()), contextlib.redirect_stderr(
-                    captured_console.stderr_writer()
-                ):
-                    self._wait_for_completion(
-                        session,
-                        previous_completed_runs,
-                        request_id=request_id,
-                        console_capture=captured_console,
-                        log_capture=captured_logs,
-                    )
-            finally:
-                root_logger.removeHandler(captured_logs)
+            self._wait_for_completion(session, previous_completed_runs, request_id=request_id)
         session.runtime_bootstrapped = True
         self._refresh_runtime_cells(session)
-        session.runtime_cells = self._merge_captured_console(session.runtime_cells or {}, captured_console.snapshot())
-        self._persist_console_lines(session, captured_console.snapshot())
-        session.runtime_cells = self._merge_runtime_error_details(session.runtime_cells or {}, captured_logs.snapshot())
         return self._with_runtime_payload(session)
 
     def get_runtime_state(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -1271,7 +868,6 @@ class Worker:
             last_saved_source_hash=sha256_text(canonical_source),
             last_projection_hash=sha256_text("\n".join(projected_lines)),
             runtime_cells={},
-            persisted_console_lines={},
             runtime_bootstrapped=False,
             pending_changed_cell_ids=[],
         )
@@ -1337,7 +933,6 @@ class Worker:
         session.runtime_session = None
         session.runtime_consumer = None
         session.runtime_cells = {}
-        session.persisted_console_lines = {}
         session.runtime_bootstrapped = False
         return self.ensure_runtime_session({"session_id": session.session_id})
 

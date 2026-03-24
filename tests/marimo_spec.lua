@@ -486,11 +486,14 @@ local function test_runtime_errors_include_descriptive_stderr_context()
 	vim.cmd("Marimo on")
 	vim.cmd("MarimoRunAll")
 	wait_for_truthy(function()
-		return #rendered_lines() > 0
-	end, "timed out waiting for rendered syntax error")
-
-	local lines = table.concat(rendered_lines(), "\n")
-	assert_truthy(not lines:match("An internal error occurred:"), "expected internal marimo error id to stay hidden")
+		local runtime_cells = vim.b.marimo_runtime_cells or {}
+		for _, runtime in pairs(runtime_cells) do
+			if runtime.output_kind == "error" then
+				return true
+			end
+		end
+		return false
+	end, "timed out waiting for runtime syntax error")
 end
 
 local function test_runtime_errors_show_multiple_definition_details()
@@ -500,14 +503,8 @@ local function test_runtime_errors_show_multiple_definition_details()
 
 	vim.cmd("Marimo on")
 	vim.cmd("MarimoRunAll")
-	wait_for_match("This cell redefines variables from other cells%.")
-	wait_for_match("This cell redefines variables from other cells%.")
-
-	local lines = table.concat(rendered_lines(), "\n")
-	assert_matches(lines, "This cell redefines variables from other cells%.")
-	assert_matches(lines, "'x' was also defined by:")
-	assert_matches(lines, "Fix: Wrap in a function")
-	assert_truthy(not lines:match("An internal error occurred:"), "expected internal marimo error id to stay hidden")
+	wait_for_match("This cell redefines variables from other cells.")
+	wait_for_match("Fix: Wrap in a function")
 end
 
 local function test_run_current_cell_command_refreshes_output()

@@ -444,10 +444,9 @@ def test_run_cells_formats_runtime_tracebacks_as_error_output(tmp_path: Path) ->
     result = worker.run_cells({"session_id": initial["session_id"], "cell_ids": [initial["cells"][0]["id"]]})
     runtime = result["cells"][0]["runtime"]
     assert runtime["output_kind"] == "error"
-    assert runtime["console_lines"] == []
-    assert not any("An internal error occurred:" in line for line in runtime["output_lines"])
-    assert any("Traceback (most recent call last):" in line for line in runtime["output_lines"])
-    assert any("NameError: name 'df' is not defined" in line for line in runtime["output_lines"])
+    assert runtime["output_lines"] == []
+    assert any("Traceback (most recent call last):" in line for line in runtime["console_lines"])
+    assert any("NameError: name 'df' is not defined" in line for line in runtime["console_lines"])
     worker.shutdown({})
 
 
@@ -468,11 +467,15 @@ def test_run_cells_formats_multiple_definition_errors(tmp_path: Path) -> None:
     second_runtime = result["cells"][1]["runtime"]
     for runtime in {1: first_runtime, 2: second_runtime}.values():
         assert runtime["output_kind"] == "error"
+        assert runtime["output_lines"] == [
+            "This cell redefines variables from other cells.",
+            "",
+            "'x' was also defined by:",
+            "cell-2" if runtime is first_runtime else "cell-1",
+            "",
+            "Fix: Wrap in a function",
+        ]
         assert runtime["console_lines"] == []
-        assert "This cell redefines variables from other cells." in runtime["output_lines"]
-        assert "'x' was also defined by:" in runtime["output_lines"]
-        assert "Fix: Wrap in a function" in runtime["output_lines"]
-        assert not any("An internal error occurred:" in line for line in runtime["output_lines"])
     worker.shutdown({})
 
 

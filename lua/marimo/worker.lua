@@ -4,70 +4,6 @@ local M = {}
 local workers = {}
 local next_request_id = 0
 
-local function extract_internal_error_id(runtime)
-	if type(runtime) ~= "table" then
-		return nil
-	end
-	if runtime.output_kind ~= "error" then
-		return nil
-	end
-	for _, line in ipairs(runtime.output_lines or {}) do
-		local error_id = tostring(line):match("An internal error occurred:%s*([%w%-]+)")
-		if error_id then
-			return error_id
-		end
-	end
-	return nil
-end
-
-local function append_unique_lines(target, lines)
-	local seen = {}
-	for _, line in ipairs(target) do
-		seen[line] = true
-	end
-	for _, line in ipairs(lines or {}) do
-		if line ~= "" and not seen[line] then
-			table.insert(target, line)
-			seen[line] = true
-		end
-	end
-	return target
-end
-
-local function enrich_runtime_errors(runtime, error_details)
-	local error_id = extract_internal_error_id(runtime)
-	if not error_id then
-		return runtime
-	end
-	local details = error_details[error_id]
-	if type(details) ~= "table" or #details == 0 then
-		return runtime
-	end
-	local enriched = vim.deepcopy(runtime)
-	enriched.output_lines = append_unique_lines(vim.deepcopy(enriched.output_lines or {}), details)
-	return enriched
-end
-
-local function enrich_payload_errors(payload, error_details)
-	if type(payload) ~= "table" then
-		return payload
-	end
-	local enriched = vim.deepcopy(payload)
-	if type(enriched.cells) == "table" then
-		for _, cell in ipairs(enriched.cells) do
-			if type(cell) == "table" and type(cell.runtime) == "table" then
-				cell.runtime = enrich_runtime_errors(cell.runtime, error_details)
-			end
-		end
-	end
-	if type(enriched.runtime_cells) == "table" then
-		for cell_id, runtime in pairs(enriched.runtime_cells) do
-			enriched.runtime_cells[cell_id] = enrich_runtime_errors(runtime, error_details)
-		end
-	end
-	return enriched
-end
-
 local function find_project_root(path)
 	local absolute = vim.fn.fnamemodify(path, ":p")
 	local dirpath = vim.fn.fnamemodify(absolute, ":h")
@@ -121,56 +57,13 @@ local function ensure_worker(path)
 		project_root = project_root,
 		pending = {},
 		stdout_buffer = "",
-		stderr_buffer = "",
 		runtime_kind = spec.runtime_kind,
-		error_details = {},
-		active_error = nil,
 	}
 
-	local function finish_error_block()
-		local active = worker.active_error
-		if not active then
-			return
-		end
-		if #active.lines > 0 then
-			worker.error_details[active.id] = vim.deepcopy(active.lines)
-		end
-		worker.active_error = nil
-	end
-
-	local function capture_stderr_line(line)
-		if line == "" then
-			finish_error_block()
-			return
-		end
-		local error_id, rest = line:match("error_id=([%w%-]+)%)%s*(.*)$")
-		if error_id then
-			finish_error_block()
-			worker.active_error = { id = error_id, lines = {} }
-			if rest and rest ~= "" then
-				table.insert(worker.active_error.lines, rest)
-			end
-			return
-		end
-		local active = worker.active_error
-		if not active then
-			return
-		end
-		if line:match("^%s") then
-			table.insert(active.lines, line)
-			return
-		end
-		finish_error_block()
-	end
-
 	local function dispatch_response(decoded)
-		finish_error_block()
 		local pending = worker.pending[decoded.id]
 		if not pending then
 			return
-		end
-		if decoded.ok then
-			decoded.result = enrich_payload_errors(decoded.result, worker.error_details)
 		end
 		pending.response = decoded
 		if pending.callback then
@@ -186,12 +79,10 @@ local function ensure_worker(path)
 	end
 
 	local function dispatch_event(decoded)
-		finish_error_block()
 		local pending = worker.pending[decoded.request_id]
 		if not pending or not pending.event_callback then
 			return
 		end
-		decoded.payload = enrich_payload_errors(decoded.payload, worker.error_details)
 		vim.schedule(function()
 			pending.event_callback(decoded)
 		end)
@@ -219,7 +110,7 @@ local function ensure_worker(path)
 
 	worker.job_id = vim.fn.jobstart(spec.cmd, {
 		stdout_buffered = false,
-		stderr_buffered = false,
+		stderr_buffered = true,
 		on_stdout = function(_, data)
 			if not data or #data == 0 then
 				return
@@ -239,26 +130,12 @@ local function ensure_worker(path)
 			if not data then
 				return
 			end
-			worker.stderr_buffer = worker.stderr_buffer .. table.concat(data, "\n")
-			while true do
-				local newline = worker.stderr_buffer:find("\n", 1, true)
-				if not newline then
-					break
-				end
-				local line = worker.stderr_buffer:sub(1, newline - 1)
-				worker.stderr_buffer = worker.stderr_buffer:sub(newline + 1)
-				capture_stderr_line(line)
-				if line:gsub("%s+", "") ~= "" then
-					last_error = line
-				end
+			local stderr = table.concat(data, "\n")
+			if stderr:gsub("%s+", "") ~= "" then
+				last_error = stderr
 			end
 		end,
 		on_exit = function()
-			if worker.stderr_buffer ~= "" then
-				capture_stderr_line(worker.stderr_buffer)
-				worker.stderr_buffer = ""
-			end
-			finish_error_block()
 			for request_id, pending in pairs(worker.pending) do
 				if pending.callback then
 					vim.schedule(function()
