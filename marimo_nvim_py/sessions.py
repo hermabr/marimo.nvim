@@ -4,10 +4,8 @@ import asyncio
 import ast
 import contextlib
 import hashlib
-import html
 import json
 import os
-import re
 import time
 import uuid
 from pathlib import Path
@@ -20,6 +18,7 @@ from marimo._ast.compiler import compile_cell
 from marimo._ast.parse import parse_notebook
 from marimo._config.config import PartialMarimoConfig
 from marimo._config.manager import get_default_config_manager
+from marimo._messaging.msgspec_encoder import asdict
 from marimo._messaging.notification import CompletedRunNotification
 from marimo._messaging.serde import deserialize_kernel_message
 from marimo._runtime.commands import AppMetadata, ExecuteCellsCommand, SyncGraphCommand
@@ -30,7 +29,6 @@ from marimo._session.consumer import SessionConsumer
 from marimo._session.model import ConnectionState, SessionMode
 from marimo._session.notebook.file_manager import AppFileManager
 from marimo._session.session import SessionImpl
-from marimo._session.state.serialize import serialize_session_view
 from marimo._types.ids import CellId_t
 from marimo._types.ids import ConsumerId
 
@@ -42,11 +40,6 @@ from marimo_nvim_py.projected import (
     promote_first_marker_to_marimo,
     render_projected_lines,
 )
-
-MAX_OUTPUT_LINES = 12
-MAX_OUTPUT_LINE_CHARS = 160
-TRACEBACK_MIMETYPE = "application/vnd.marimo+traceback"
-
 
 def sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
@@ -78,44 +71,6 @@ class RuntimeSessionConsumer(SessionConsumer):
 
 def _cell_config(cell: dict[str, Any]) -> CellConfig:
     return CellConfig.from_dict(cell.get("options", {}), warn=False)
-
-
-def _build_notebook_ir(
-    path: str, header: str | None, app_options: dict[str, Any], cells: list[dict[str, Any]]
-) -> NotebookSerializationV1:
-    return NotebookSerializationV1(
-        app=AppInstantiation(options=app_options or {}),
-        header=Header(value=header) if header else None,
-        cells=[CellDef(code=cell["code"], name=cell["name"], options=cell.get("options", {})) for cell in cells],
-        filename=path,
-    )
-
-
-def _truncate_lines(lines: list[str]) -> list[str]:
-    trimmed: list[str] = []
-    truncated = False
-    for line in lines:
-        current = line
-        if len(current) > MAX_OUTPUT_LINE_CHARS:
-            current = current[: MAX_OUTPUT_LINE_CHARS - 3] + "..."
-            truncated = True
-        trimmed.append(current)
-    while trimmed and trimmed[-1] == "":
-        trimmed.pop()
-    if len(trimmed) > MAX_OUTPUT_LINES:
-        trimmed = trimmed[:MAX_OUTPUT_LINES]
-        truncated = True
-    if truncated:
-        trimmed.append("[output truncated]")
-    return trimmed
-
-
-def _split_text_output(data: str) -> list[str]:
-    return _truncate_lines(data.splitlines())
-
-
-def _is_hidden_internal_error(message: str) -> bool:
-    return message.startswith("An internal error occurred:")
 
 
 def _collect_assigned_names(node: ast.AST) -> set[str]:
@@ -167,161 +122,79 @@ def _cell_defined_names(code: str) -> set[str]:
     return _collect_assigned_names(tree)
 
 
-def _multiple_definition_details(cells: list[dict[str, Any]]) -> dict[str, list[str]]:
-    definitions: dict[str, list[int]] = {}
-    names_by_index: list[set[str]] = []
-    for index, cell in enumerate(cells):
+def _multiple_definition_errors(cells: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    definitions: dict[str, list[str]] = {}
+    names_by_cell_id: dict[str, set[str]] = {}
+    for cell in cells:
         names = _cell_defined_names(cell["code"])
-        names_by_index.append(names)
+        names_by_cell_id[cell["id"]] = names
         for name in names:
-            definitions.setdefault(name, []).append(index)
+            definitions.setdefault(name, []).append(cell["id"])
 
-    details: dict[str, list[str]] = {}
-    for index, cell in enumerate(cells):
-        conflicts: dict[str, list[int]] = {}
-        for name in names_by_index[index]:
-            other_indexes = [other for other in definitions.get(name, []) if other != index]
-            if other_indexes:
-                conflicts[name] = other_indexes
-        if not conflicts:
-            continue
-        lines = ["This cell redefines variables from other cells."]
-        for name in sorted(conflicts):
-            lines.append("")
-            lines.append(f"'{name}' was also defined by:")
-            for other_index in conflicts[name]:
-                lines.append(f"cell-{other_index + 1}")
-        lines.append("")
-        lines.append("Fix: Wrap in a function")
-        details[cell["id"]] = lines
-    return details
-
-
-def _placeholder(kind: str, mimetype: str) -> tuple[str, str]:
-    if kind == "html":
-        return "html", "[html output]"
-    if kind == "media":
-        return "media", f"[{mimetype} output]"
-    if kind == "widget":
-        return "widget", "[widget output]"
-    return "empty", ""
+    errors_by_cell_id: dict[str, list[dict[str, Any]]] = {}
+    for cell in cells:
+        cell_id = cell["id"]
+        errors: list[dict[str, Any]] = []
+        for name in sorted(names_by_cell_id[cell_id]):
+            other_cells = [other for other in definitions.get(name, []) if other != cell_id]
+            if not other_cells:
+                continue
+            errors.append(
+                {
+                    "type": "multiple-defs",
+                    "msg": f"The variable '{name}' was defined by another cell",
+                    "name": name,
+                    "cells": other_cells,
+                }
+            )
+        if errors:
+            errors_by_cell_id[cell_id] = errors
+    return errors_by_cell_id
 
 
-def _html_to_text(data: str) -> list[str]:
-    text = re.sub(r"<br\s*/?>", "\n", data, flags=re.IGNORECASE)
-    text = re.sub(r"</(p|div|li|tr|h[1-6])>", "\n", text, flags=re.IGNORECASE)
-    text = re.sub(r"<[^>]+>", "", text)
-    text = html.unescape(text)
-    lines = [line.strip() for line in text.splitlines()]
-    lines = [line for line in lines if line != ""]
-    return _truncate_lines(lines)
-
-
-def _normalize_serialized_error_output(output: dict[str, Any]) -> dict[str, Any]:
-    runtime: dict[str, Any] = {
-        "output_kind": "error",
-        "output_lines": [],
-        "output_summary": None,
-        "run_result_status": "marimo-error",
-    }
-    traceback = [str(line) for line in output.get("traceback", []) if str(line) != ""]
-    if traceback:
-        runtime["output_lines"] = _truncate_lines(traceback)
-        return runtime
-    evalue = str(output.get("evalue") or "")
-    ename = str(output.get("ename") or "")
-    if evalue != "" and not _is_hidden_internal_error(evalue):
-        runtime["output_lines"] = _truncate_lines([evalue])
-    elif ename != "" and ename != "internal":
-        runtime["output_lines"] = _truncate_lines([ename])
-    return runtime
-
-
-def _normalize_serialized_data_output(output: dict[str, Any]) -> dict[str, Any]:
-    runtime: dict[str, Any] = {
-        "output_kind": "empty",
-        "output_lines": [],
-        "output_summary": None,
-        "run_result_status": None,
-    }
-    data = cast(dict[str, Any], output.get("data") or {})
-    if not data:
-        return runtime
-    if isinstance(data.get("text/plain"), str):
-        lines = _split_text_output(cast(str, data["text/plain"]))
-        runtime["output_kind"] = "text" if lines else "empty"
-        runtime["output_lines"] = lines
-        return runtime
-    if isinstance(data.get("text/html"), str):
-        lines = _html_to_text(cast(str, data["text/html"]))
-        if lines:
-            runtime["output_kind"] = "text"
-            runtime["output_lines"] = lines
-        else:
-            kind, summary = _placeholder("html", "text/html")
-            runtime["output_kind"] = kind
-            runtime["output_summary"] = summary
-        return runtime
-    for mimetype in data:
-        if mimetype.startswith("image/"):
-            kind, summary = _placeholder("media", mimetype)
-            runtime["output_kind"] = kind
-            runtime["output_summary"] = summary
-            return runtime
-    runtime["output_kind"], runtime["output_summary"] = _placeholder("widget", "application/vnd.marimo+mimebundle")
-    return runtime
-
-
-def _normalize_serialized_outputs(outputs: list[dict[str, Any]]) -> dict[str, Any]:
-    if not outputs:
-        return {
-            "output_kind": "empty",
-            "output_lines": [],
-            "output_summary": None,
-            "run_result_status": None,
-        }
-    first = outputs[0]
-    if first.get("type") == "error":
-        return _normalize_serialized_error_output(first)
-    if first.get("type") == "data":
-        return _normalize_serialized_data_output(first)
-    return {
-        "output_kind": "empty",
-        "output_lines": [],
-        "output_summary": None,
-        "run_result_status": None,
-    }
-
-
-def _normalize_serialized_console(console: list[dict[str, Any]]) -> list[str]:
-    lines: list[str] = []
-    for output in console:
-        if output.get("type") == "streamMedia":
-            mimetype = str(output.get("mimetype") or "media")
-            lines.append(f"[{mimetype} output]")
-            continue
-        text = output.get("text")
-        if not isinstance(text, str):
-            continue
-        mimetype = output.get("mimetype")
-        chunk_lines = _html_to_text(text) if mimetype in {"text/html", TRACEBACK_MIMETYPE} else text.splitlines()
-        lines.extend(chunk_lines)
-    return _truncate_lines(lines)
+def _build_notebook_ir(
+    path: str, header: str | None, app_options: dict[str, Any], cells: list[dict[str, Any]]
+) -> NotebookSerializationV1:
+    return NotebookSerializationV1(
+        app=AppInstantiation(options=app_options or {}),
+        header=Header(value=header) if header else None,
+        cells=[CellDef(code=cell["code"], name=cell["name"], options=cell.get("options", {})) for cell in cells],
+        filename=path,
+    )
 
 
 def _runtime_defaults() -> dict[str, Any]:
     return {
         "status": None,
         "stale_inputs": False,
-        "run_result_status": None,
-        "output_kind": "empty",
-        "output_lines": [],
-        "output_summary": None,
-        "has_console": False,
-        "console_lines": [],
+        "output": None,
+        "console": [],
         "last_run_timestamp": None,
         "last_execution_time_ms": None,
     }
+
+
+def _cell_output_message(output: Any) -> dict[str, Any] | None:
+    if output is None:
+        return None
+    return asdict(output)
+
+
+def _console_messages(console: Any) -> list[dict[str, Any]]:
+    if console is None:
+        return []
+    if isinstance(console, list):
+        return [asdict(output) for output in console]
+    return [asdict(console)]
+
+
+def _is_internal_error_output(output: dict[str, Any] | None) -> bool:
+    if output is None or output.get("mimetype") != "application/vnd.marimo+error":
+        return False
+    data = output.get("data")
+    if not isinstance(data, list) or not data:
+        return False
+    return all(isinstance(item, dict) and item.get("type") == "internal" for item in data)
 
 
 class Worker:
@@ -543,44 +416,28 @@ class Worker:
         if session.runtime_session is None:
             return {}
         view = session.runtime_session.session_view
-        serialized = serialize_session_view(view, cell_ids=[cell["id"] for cell in session.cells])
-        serialized_by_id = {cell["id"]: cell for cell in serialized["cells"]}
         runtime_cells: dict[str, dict[str, Any]] = {}
+        multiple_definition_errors = _multiple_definition_errors(session.cells)
         for cell in session.cells:
             cell_id = cell["id"]
             runtime = _runtime_defaults()
-            serialized_cell = serialized_by_id.get(cell_id, {"outputs": [], "console": []})
-            runtime.update(_normalize_serialized_outputs(cast(list[dict[str, Any]], serialized_cell.get("outputs", []))))
-            runtime["console_lines"] = _normalize_serialized_console(cast(list[dict[str, Any]], serialized_cell.get("console", [])))
-            runtime["has_console"] = bool(runtime["console_lines"])
             notification = view.cell_notifications.get(cell_id)
             if notification is not None:
                 runtime["status"] = notification.status
                 runtime["stale_inputs"] = bool(notification.stale_inputs)
+                runtime["output"] = _cell_output_message(notification.output)
+                runtime["console"] = _console_messages(notification.console)
+                if _is_internal_error_output(runtime["output"]) and multiple_definition_errors.get(cell_id):
+                    runtime["output"] = {
+                        "channel": "marimo-error",
+                        "mimetype": "application/vnd.marimo+error",
+                        "data": multiple_definition_errors[cell_id],
+                    }
             execution_time = view.last_execution_time.get(cell_id)
             if isinstance(execution_time, (int, float)) and runtime["status"] == "idle":
                 runtime["last_execution_time_ms"] = int(execution_time)
             runtime_cells[cell_id] = runtime
         return runtime_cells
-
-    def _merge_multiple_definition_details(
-        self,
-        session: Session,
-        runtime_cells: dict[str, dict[str, Any]],
-    ) -> dict[str, dict[str, Any]]:
-        details = _multiple_definition_details(session.cells)
-        if not details:
-            return runtime_cells
-        merged = {cell_id: dict(runtime) for cell_id, runtime in runtime_cells.items()}
-        for cell_id, lines in details.items():
-            runtime = dict(merged.get(cell_id, _runtime_defaults()))
-            if runtime.get("output_kind") != "error":
-                continue
-            if runtime.get("output_lines") or runtime.get("console_lines"):
-                continue
-            runtime["output_lines"] = _truncate_lines(lines)
-            merged[cell_id] = runtime
-        return merged
 
     def _wait_for_completion(
         self,
@@ -623,7 +480,6 @@ class Worker:
                 return 0, [], {}
             session.runtime_session.flush_messages()
             runtime_cells = self._serialized_runtime_cells(session)
-            runtime_cells = self._merge_multiple_definition_details(session, runtime_cells)
             session.runtime_cells = runtime_cells
             notifications = list(session.runtime_session.session_view.cell_notifications.values())
             completed_runs = session.runtime_consumer.completed_runs if session.runtime_consumer else 0
@@ -647,7 +503,7 @@ class Worker:
             os.chdir(original)
 
     def _with_runtime_payload(self, session: Session) -> dict[str, Any]:
-        runtime_cells = self._merge_multiple_definition_details(session, session.runtime_cells or {})
+        runtime_cells = session.runtime_cells or {}
         session.runtime_cells = runtime_cells
         cells = [{**cell, "runtime": runtime_cells.get(cell["id"], _runtime_defaults())} for cell in session.cells]
         return {
@@ -741,43 +597,6 @@ class Worker:
         deleted_ids = [cell["id"] for cell in previous_cells if cell["id"] not in current_ids]
         return changed_ids, deleted_ids
 
-    def _runtime_needs_execution(self, runtime: dict[str, Any] | None) -> bool:
-        if runtime is None:
-            return True
-        if runtime.get("stale_inputs"):
-            return True
-        if runtime.get("last_execution_time_ms") is None:
-            return True
-        return False
-
-    def _execution_closure(self, session: Session, requested_ids: list[str], include_ancestors: bool) -> list[str]:
-        valid_ids = {cell["id"] for cell in session.cells}
-        requested = {cell_id for cell_id in requested_ids if cell_id in valid_ids}
-        if not requested:
-            return []
-        if not include_ancestors:
-            return [cell["id"] for cell in session.cells if cell["id"] in requested]
-        try:
-            graph = DirectedGraph()
-            for cell in session.cells:
-                graph.register_cell(cell["id"], compile_cell(cell["code"], cell_id=cell["id"]))
-        except Exception:  # noqa: BLE001
-            return [cell["id"] for cell in session.cells if cell["id"] in requested]
-
-        pending_changed = set(session.pending_changed_cell_ids or [])
-        runtime_cells = session.runtime_cells or {}
-        closure = set(requested)
-        for cell_id in requested:
-            if cell_id in graph.cells:
-                ancestors = cast(set[str], graph.ancestors(cast(CellId_t, cell_id)))
-                should_include_all = self._runtime_needs_execution(runtime_cells.get(cell_id)) or any(
-                    ancestor_id in pending_changed for ancestor_id in ancestors
-                )
-                for ancestor_id in ancestors:
-                    if should_include_all or self._runtime_needs_execution(runtime_cells.get(ancestor_id)):
-                        closure.add(ancestor_id)
-        return [cell["id"] for cell in session.cells if cell["id"] in closure]
-
     def sync_runtime_graph(self, params: dict[str, Any]) -> dict[str, Any]:
         session = self.sessions[params["session_id"]]
         self.ensure_runtime_session({"session_id": session.session_id})
@@ -817,6 +636,41 @@ class Worker:
         self._refresh_runtime_cells(session)
         return self._with_runtime_payload(session)
 
+    def _runtime_needs_execution(self, runtime: dict[str, Any] | None) -> bool:
+        if runtime is None:
+            return True
+        if runtime.get("stale_inputs"):
+            return True
+        if runtime.get("last_execution_time_ms") is None:
+            return True
+        return False
+
+    def _execution_closure(self, session: Session, requested_ids: list[str]) -> list[str]:
+        valid_ids = {cell["id"] for cell in session.cells}
+        requested = {cell_id for cell_id in requested_ids if cell_id in valid_ids}
+        if not requested:
+            return []
+        try:
+            graph = DirectedGraph()
+            for cell in session.cells:
+                graph.register_cell(cell["id"], compile_cell(cell["code"], cell_id=cell["id"]))
+        except Exception:  # noqa: BLE001
+            return [cell["id"] for cell in session.cells if cell["id"] in requested]
+
+        pending_changed = set(session.pending_changed_cell_ids or [])
+        runtime_cells = session.runtime_cells or {}
+        closure = set(requested)
+        for cell_id in requested:
+            if cell_id in graph.cells:
+                ancestors = cast(set[str], graph.ancestors(cast(CellId_t, cell_id)))
+                should_include_all = self._runtime_needs_execution(runtime_cells.get(cell_id)) or any(
+                    ancestor_id in pending_changed for ancestor_id in ancestors
+                )
+                for ancestor_id in ancestors:
+                    if should_include_all or self._runtime_needs_execution(runtime_cells.get(ancestor_id)):
+                        closure.add(ancestor_id)
+        return [cell["id"] for cell in session.cells if cell["id"] in closure]
+
     def run_cells(self, params: dict[str, Any]) -> dict[str, Any]:
         session = self.sessions[params["session_id"]]
         self.ensure_runtime_session({"session_id": session.session_id})
@@ -826,15 +680,7 @@ class Worker:
         if not requested_ids:
             return self._session_payload(session)
         code_by_id = {cell["id"]: cell["code"] for cell in session.cells}
-        runnable_ids = [
-            cell_id
-            for cell_id in self._execution_closure(
-                session,
-                requested_ids,
-                include_ancestors=True,
-            )
-            if cell_id in code_by_id
-        ]
+        runnable_ids = [cell_id for cell_id in self._execution_closure(session, requested_ids) if cell_id in code_by_id]
         if not runnable_ids:
             return self._session_payload(session)
         previous_completed_runs = session.runtime_consumer.completed_runs if session.runtime_consumer else 0

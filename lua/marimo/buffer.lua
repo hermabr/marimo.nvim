@@ -11,11 +11,20 @@ local navigation = dofile(dir .. "/navigation.lua")
 
 local M = {}
 local runtime_state = {}
+local write_projection_async = worker.request_isolated_async
+local close_session_async = function(filepath, session_id, callback)
+	worker.request_async(filepath, "close_session", {
+		session_id = session_id,
+	}, callback or function() end)
+end
 
 local function state_for(bufnr)
 	runtime_state[bufnr] = runtime_state[bufnr] or {
 		timer = nil,
 		request_id = 0,
+		write_generation = 0,
+		write_in_flight = nil,
+		pending_write = nil,
 	}
 	return runtime_state[bufnr]
 end
@@ -66,9 +75,8 @@ local function mark_cells_pending(bufnr, cell_ids)
 		local runtime = vim.deepcopy(current[cell_id] or {})
 		runtime.status = runtime.status == "running" and "running" or "queued"
 		runtime.stale_inputs = false
-		runtime.output_kind = runtime.output_kind or "empty"
-		runtime.output_lines = runtime.output_lines or {}
-		runtime.console_lines = runtime.console_lines or {}
+		runtime.output = runtime.output or nil
+		runtime.console = runtime.console or {}
 		updates[cell_id] = runtime
 	end
 	merge_runtime_cells(bufnr, updates)
@@ -131,6 +139,66 @@ local function handle_async_runtime_event(bufnr, request_id, event)
 		local payload = event.payload or {}
 		apply_projection_payload(bufnr, payload, true)
 	end
+end
+
+local function finish_projected_write(bufnr, request, payload, err)
+	local entry = runtime_state[bufnr]
+	if not entry then
+		return
+	end
+	if entry.write_in_flight == request.generation then
+		entry.write_in_flight = nil
+	end
+	if entry.pending_write then
+		local next_request = entry.pending_write
+		entry.pending_write = nil
+		entry.write_in_flight = next_request.generation
+		write_projection_async(next_request.filepath, "write_projection", next_request.params, function(next_payload, next_err)
+			finish_projected_write(bufnr, next_request, next_payload, next_err)
+		end)
+	end
+	if err then
+		util.notify("failed to write marimo notebook: " .. err, vim.log.levels.ERROR)
+		return
+	end
+	if not vim.api.nvim_buf_is_valid(bufnr) then
+		return
+	end
+	if entry.pending_write then
+		return
+	end
+	vim.b[bufnr].marimo_canonical_source = payload.canonical_source or vim.b[bufnr].marimo_canonical_source
+	vim.b[bufnr].marimo_last_saved_source_hash = payload.last_saved_source_hash
+	lsp_bridge.sync_mirror(bufnr, vim.b[bufnr].marimo_canonical_source)
+	if vim.api.nvim_buf_get_changedtick(bufnr) == request.changedtick then
+		vim.bo[bufnr].modified = false
+	end
+	vim.api.nvim_exec_autocmds("BufWritePost", { buffer = bufnr, modeline = false })
+	util.show_write_message(bufnr)
+end
+
+local function enqueue_projected_write(bufnr, filepath, lines)
+	local entry = state_for(bufnr)
+	entry.write_generation = entry.write_generation + 1
+	local request = {
+		generation = entry.write_generation,
+		filepath = filepath,
+		changedtick = vim.api.nvim_buf_get_changedtick(bufnr),
+		params = {
+			path = filepath,
+			content = util.join_lines(lines),
+			header = vim.b[bufnr].marimo_header,
+			app_options = vim.b[bufnr].marimo_app_options or vim.empty_dict(),
+		},
+	}
+	if entry.write_in_flight then
+		entry.pending_write = request
+		return
+	end
+	entry.write_in_flight = request.generation
+	write_projection_async(filepath, "write_projection", request.params, function(payload, err)
+		finish_projected_write(bufnr, request, payload, err)
+	end)
 end
 
 function M.reload_raw_buffer(bufnr)
@@ -213,28 +281,10 @@ function M.write_buffer(bufnr)
 	end
 
 	local changedtick = vim.api.nvim_buf_get_changedtick(bufnr)
-	worker.request_isolated_async(filepath, "write_projection", {
-		path = filepath,
-		content = util.join_lines(lines),
-		header = vim.b[bufnr].marimo_header,
-		app_options = vim.b[bufnr].marimo_app_options or vim.empty_dict(),
-	}, function(payload, err)
-		if err then
-			util.notify("failed to write marimo notebook: " .. err, vim.log.levels.ERROR)
-			return
-		end
-		if not vim.api.nvim_buf_is_valid(bufnr) then
-			return
-		end
-		vim.b[bufnr].marimo_canonical_source = payload.canonical_source or vim.b[bufnr].marimo_canonical_source
-		vim.b[bufnr].marimo_last_saved_source_hash = payload.last_saved_source_hash
-		lsp_bridge.sync_mirror(bufnr, vim.b[bufnr].marimo_canonical_source)
-		if vim.api.nvim_buf_get_changedtick(bufnr) == changedtick then
-			vim.bo[bufnr].modified = false
-		end
-		vim.api.nvim_exec_autocmds("BufWritePost", { buffer = bufnr, modeline = false })
-		util.show_write_message(bufnr)
-	end)
+	if vim.api.nvim_buf_get_changedtick(bufnr) ~= changedtick then
+		changedtick = vim.api.nvim_buf_get_changedtick(bufnr)
+	end
+	enqueue_projected_write(bufnr, filepath, lines)
 end
 
 function M.sync_buffer(bufnr, opts)
@@ -413,22 +463,44 @@ function M.set_mode(enabled, opts)
 	end
 
 	if vim.b[bufnr].marimo_projected then
-		local session_id = vim.b[bufnr].marimo_session_id
-		local filepath = vim.api.nvim_buf_get_name(bufnr)
 		local ok, err = M.reload_raw_buffer(bufnr)
 		if not ok then
 			return ok, err
 		end
-		if session_id and filepath ~= "" then
-			worker.request(filepath, "close_session", {
-				session_id = session_id,
-			})
-		end
-		runtime_state[bufnr] = nil
+		M.cleanup_buffer(bufnr)
 		return true
 	end
 
 	return true
 end
+
+function M.cleanup_buffer(bufnr)
+	bufnr = bufnr or vim.api.nvim_get_current_buf()
+	local session_id = vim.b[bufnr].marimo_session_id
+	local filepath = vim.api.nvim_buf_get_name(bufnr)
+	stop_autorun_timer(bufnr)
+	runtime_state[bufnr] = nil
+	if session_id and filepath ~= "" then
+		close_session_async(filepath, session_id)
+	end
+	if vim.api.nvim_buf_is_valid(bufnr) then
+		render.clear(bufnr)
+		session.clear_session(bufnr)
+	end
+end
+
+M._private = {
+	set_write_projection_async = function(fn)
+		write_projection_async = fn or worker.request_isolated_async
+	end,
+	set_close_session_async = function(fn)
+		close_session_async = fn
+			or function(filepath, session_id, callback)
+				worker.request_async(filepath, "close_session", {
+					session_id = session_id,
+				}, callback or function() end)
+			end
+	end,
+}
 
 return M

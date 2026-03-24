@@ -512,7 +512,7 @@ local function test_runtime_errors_include_descriptive_stderr_context()
 	wait_for_truthy(function()
 		local runtime_cells = vim.b.marimo_runtime_cells or {}
 		for _, runtime in pairs(runtime_cells) do
-			if runtime.output_kind == "error" then
+			if runtime.output and runtime.output.mimetype == "application/vnd.marimo+error" then
 				return true
 			end
 		end
@@ -527,8 +527,7 @@ local function test_runtime_errors_show_multiple_definition_details()
 
 	vim.cmd("Marimo on")
 	vim.cmd("MarimoRunAll")
-	wait_for_match("This cell redefines variables from other cells.")
-	wait_for_match("Fix: Wrap in a function")
+	wait_for_match("defined by another cell")
 end
 
 local function test_run_current_cell_command_refreshes_output()
