@@ -40,7 +40,7 @@ local function ensure_sync_autocmd(bufnr)
 		group = group,
 		buffer = bufnr,
 		callback = function(args)
-			if vim.b[args.buf].marimo_projected then
+			if vim.b[args.buf].marimo_projected and not vim.b[args.buf].marimo_internal_update then
 				buffer.schedule_sync(args.buf, { immediate = args.event == "InsertLeave" })
 			end
 		end,
@@ -146,6 +146,7 @@ M._private = {
 	as_json_object = util.as_json_object,
 	promote_first_marker_to_marimo = markers.promote_first_marker_to_marimo,
 	normalize_projected_buffer_lines = markers.normalize_projected_buffer_lines,
+	render_projected_buffer_lines = markers.render_projected_buffer_lines,
 	find_project_root = worker._private.find_project_root,
 	find_cell_start_rows = navigation.find_cell_start_rows,
 	first_content_row_after_marker = navigation.first_content_row_after_marker,

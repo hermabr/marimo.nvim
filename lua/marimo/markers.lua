@@ -291,4 +291,33 @@ function M.normalize_projected_buffer_lines(lines)
 	return normalized
 end
 
+function M.render_projected_buffer_lines(cells)
+	local projected = {}
+	for idx, cell in ipairs(cells or {}) do
+		local opts = vim.deepcopy(cell.options or {})
+		if idx == 1 then
+			opts.marimo = true
+		end
+		if cell.name == "setup" then
+			opts.setup = true
+		end
+		table.insert(projected, "# +" .. render_options(opts))
+		table.insert(projected, "")
+		local body = {}
+		if type(cell.code) == "string" and cell.code ~= "" then
+			body = trim_blank_lines(vim.split(cell.code, "\n", { plain = true }))
+		end
+		for _, line in ipairs(body) do
+			table.insert(projected, line)
+		end
+		table.insert(projected, "")
+	end
+
+	while #projected > 0 and projected[#projected] == "" do
+		table.remove(projected)
+	end
+
+	return projected
+end
+
 return M
