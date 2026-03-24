@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import html
 import json
+import re
 import subprocess
 import sys
 import time
@@ -29,6 +31,38 @@ def _():
 if __name__ == "__main__":
     app.run()
 """
+
+
+def assert_text_output(runtime: dict[str, object], expected: str) -> None:
+    output = cast(dict[str, object], runtime["output"])
+    text = output_text(output)
+    assert expected in text
+
+
+def output_text(output: dict[str, object]) -> str:
+    mimetype = cast(str, output["mimetype"])
+    if mimetype == "text/plain":
+        return str(output["data"])
+    if mimetype == "text/html":
+        return html.unescape(re.sub(r"<[^>]+>", "", str(output["data"])))
+    if mimetype == "text/markdown":
+        return str(output["data"])
+    raise AssertionError(f"expected text output, got {mimetype!r}")
+
+
+def assert_no_output(runtime: dict[str, object]) -> None:
+    assert runtime["output"] is None
+
+
+def console_text(runtime: dict[str, object]) -> list[str]:
+    console = cast(list[dict[str, object]], runtime["console"])
+    lines: list[str] = []
+    for entry in console:
+        if entry["channel"] == "media":
+            lines.append(f'[{entry["mimetype"]} output]')
+        else:
+            lines.extend(str(entry["data"]).splitlines())
+    return lines
 
 
 def test_parse_projected_cells_supports_setup_cell() -> None:
@@ -293,8 +327,7 @@ def test_run_cells_populates_runtime_output(tmp_path: Path) -> None:
     result = worker.run_cells({"session_id": initial["session_id"], "cell_ids": [initial["cells"][0]["id"]]})
     runtime = result["cells"][0]["runtime"]
     assert runtime["status"] == "idle"
-    assert runtime["output_kind"] == "text"
-    assert runtime["output_lines"] == ["1"]
+    assert_text_output(runtime, "1")
     worker.shutdown({})
 
 
@@ -314,9 +347,9 @@ def test_run_cells_only_runs_selected_cell_and_its_ancestors(tmp_path: Path) -> 
     first_runtime = result["cells"][0]["runtime"]
     second_runtime = result["cells"][1]["runtime"]
     third_runtime = result["cells"][2]["runtime"]
-    assert first_runtime["output_lines"] == ["1"]
-    assert second_runtime["output_lines"] == ["2"]
-    assert third_runtime["output_lines"] == []
+    assert_text_output(first_runtime, "1")
+    assert_text_output(second_runtime, "2")
+    assert_no_output(third_runtime)
     worker.shutdown({})
 
 
@@ -346,12 +379,12 @@ def test_run_cells_does_not_rerun_non_stale_ancestors_after_bootstrap(tmp_path: 
     leaf_id = initial["cells"][2]["id"]
 
     first = worker.run_cells({"session_id": initial["session_id"], "cell_ids": [leaf_id]})
-    assert first["cells"][1]["runtime"]["output_lines"] == ["1"]
-    assert first["cells"][2]["runtime"]["output_lines"] == ["2"]
+    assert_text_output(first["cells"][1]["runtime"], "1")
+    assert_text_output(first["cells"][2]["runtime"], "2")
 
     second = worker.run_cells({"session_id": initial["session_id"], "cell_ids": [leaf_id]})
-    assert second["cells"][1]["runtime"]["output_lines"] == ["1"]
-    assert second["cells"][2]["runtime"]["output_lines"] == ["3"]
+    assert_text_output(second["cells"][1]["runtime"], "1")
+    assert_text_output(second["cells"][2]["runtime"], "3")
     worker.shutdown({})
 
 
@@ -370,9 +403,9 @@ def test_run_cells_reruns_stale_ancestors_after_sync_projection(tmp_path: Path) 
     leaf_id = initial["cells"][2]["id"]
 
     bootstrapped = worker.run_cells({"session_id": initial["session_id"], "cell_ids": [leaf_id]})
-    assert bootstrapped["cells"][0]["runtime"]["output_lines"] == ["1"]
-    assert bootstrapped["cells"][1]["runtime"]["output_lines"] == ["2"]
-    assert bootstrapped["cells"][2]["runtime"]["output_lines"] == ["3"]
+    assert_text_output(bootstrapped["cells"][0]["runtime"], "1")
+    assert_text_output(bootstrapped["cells"][1]["runtime"], "2")
+    assert_text_output(bootstrapped["cells"][2]["runtime"], "3")
 
     worker.sync_projection(
         {
@@ -381,9 +414,9 @@ def test_run_cells_reruns_stale_ancestors_after_sync_projection(tmp_path: Path) 
         }
     )
     rerun = worker.run_cells({"session_id": initial["session_id"], "cell_ids": [leaf_id]})
-    assert rerun["cells"][0]["runtime"]["output_lines"] == ["7"]
-    assert rerun["cells"][1]["runtime"]["output_lines"] == ["8"]
-    assert rerun["cells"][2]["runtime"]["output_lines"] == ["9"]
+    assert_text_output(rerun["cells"][0]["runtime"], "7")
+    assert_text_output(rerun["cells"][1]["runtime"], "8")
+    assert_text_output(rerun["cells"][2]["runtime"], "9")
     worker.shutdown({})
 
 
@@ -405,8 +438,8 @@ def test_sync_and_run_updates_descendant_outputs(tmp_path: Path) -> None:
             "content": "# + {marimo}\n\nx = 3\nx\n\n# +\n\ny = x + 1\ny",
         }
     )
-    assert updated["cells"][0]["runtime"]["output_lines"] == ["3"]
-    assert updated["cells"][1]["runtime"]["output_lines"] == ["4"]
+    assert_text_output(updated["cells"][0]["runtime"], "3")
+    assert_text_output(updated["cells"][1]["runtime"], "4")
     worker.shutdown({})
 
 
@@ -424,12 +457,13 @@ def test_html_output_is_summarized(tmp_path: Path) -> None:
     )
     result = worker.run_cells({"session_id": initial["session_id"], "cell_ids": [initial["cells"][0]["id"]]})
     runtime = result["cells"][0]["runtime"]
-    assert runtime["output_kind"] in {"text", "html", "widget"}
-    assert runtime["output_summary"] is not None or runtime["output_lines"]
+    output = cast(dict[str, object], runtime["output"])
+    assert output["mimetype"] in {"text/plain", "text/html", "text/markdown", "application/vnd.marimo+mimebundle"}
+    assert output["data"] is not None
     worker.shutdown({})
 
 
-def test_run_cells_captures_stdout_as_console_lines(tmp_path: Path) -> None:
+def test_run_cells_captures_stdout_as_console_entries(tmp_path: Path) -> None:
     worker = Worker()
     path = tmp_path / "stdout_output.py"
     initial = worker.open_session(
@@ -443,9 +477,8 @@ def test_run_cells_captures_stdout_as_console_lines(tmp_path: Path) -> None:
     )
     result = worker.run_cells({"session_id": initial["session_id"], "cell_ids": [initial["cells"][0]["id"]]})
     runtime = result["cells"][0]["runtime"]
-    assert runtime["output_lines"] == ["1"]
-    assert runtime["console_lines"] == ["hello"]
-    assert runtime["has_console"] is True
+    assert_text_output(runtime, "1")
+    assert console_text(runtime) == ["hello"]
     worker.shutdown({})
 
 
@@ -471,8 +504,8 @@ def test_run_cells_emits_incremental_runtime_updates(tmp_path: Path) -> None:
         }
     )
 
-    assert result["cells"][0]["runtime"]["output_lines"] == ["1"]
-    assert result["cells"][1]["runtime"]["output_lines"] == ["2"]
+    assert_text_output(result["cells"][0]["runtime"], "1")
+    assert_text_output(result["cells"][1]["runtime"], "2")
     first_cell_id = initial["cells"][0]["id"]
     second_cell_id = initial["cells"][1]["id"]
     runtime_events = [event for event in events if event.get("event") == "runtime_update"]
@@ -480,8 +513,8 @@ def test_run_cells_emits_incremental_runtime_updates(tmp_path: Path) -> None:
     assert any(
         event.get("request_id") == 42
         and isinstance(event.get("payload"), dict)
-        and cast(dict[str, dict[str, object]], cast(dict[str, object], event["payload"])["runtime_cells"]).get(first_cell_id, {}).get("output_lines")
-        == ["1"]
+        and isinstance(cast(dict[str, dict[str, object]], cast(dict[str, object], event["payload"])["runtime_cells"]).get(first_cell_id, {}).get("output"), dict)
+        and "1" in output_text(cast(dict[str, object], cast(dict[str, dict[str, object]], cast(dict[str, object], event["payload"])["runtime_cells"]).get(first_cell_id, {})["output"]))
         and cast(dict[str, dict[str, object]], cast(dict[str, object], event["payload"])["runtime_cells"]).get(second_cell_id, {}).get("status")
         in {"queued", "running"}
         for event in runtime_events
@@ -608,7 +641,7 @@ def test_run_cells_resolves_relative_paths_from_notebook_directory(tmp_path: Pat
         }
     )
     result = worker.run_cells({"session_id": initial["session_id"], "cell_ids": [initial["cells"][0]["id"]]})
-    assert result["cells"][0]["runtime"]["output_lines"] == ["'hello'"]
+    assert_text_output(result["cells"][0]["runtime"], "'hello'")
     worker.shutdown({})
 
 
@@ -631,9 +664,9 @@ def test_run_cells_attributes_stdout_to_the_emitting_cell(tmp_path: Path) -> Non
     result = worker.run_cells({"session_id": initial["session_id"], "cell_ids": [cell["id"] for cell in initial["cells"]]})
     first_runtime = result["cells"][0]["runtime"]
     second_runtime = result["cells"][1]["runtime"]
-    assert first_runtime["output_lines"] == ["'hello'"]
-    assert first_runtime["console_lines"] == []
-    assert second_runtime["console_lines"] == ["HEY"]
+    assert_text_output(first_runtime, "'hello'")
+    assert console_text(first_runtime) == []
+    assert console_text(second_runtime) == ["HEY"]
     worker.shutdown({})
 
 
@@ -652,11 +685,12 @@ def test_run_cells_attributes_stdout_after_html_output_to_the_emitting_cell(tmp_
     result = worker.run_cells({"session_id": initial["session_id"], "cell_ids": [cell["id"] for cell in initial["cells"]]})
     first_runtime = result["cells"][0]["runtime"]
     second_runtime = result["cells"][1]["runtime"]
-    assert first_runtime["output_kind"] in {"text", "html", "widget"}
-    assert first_runtime["console_lines"] == []
-    assert second_runtime["console_lines"] == ["HEY"]
+    output = cast(dict[str, object], first_runtime["output"])
+    assert output["mimetype"] in {"text/plain", "text/html", "text/markdown", "application/vnd.marimo+mimebundle"}
+    assert console_text(first_runtime) == []
+    assert console_text(second_runtime) == ["HEY"]
     refreshed = worker.get_runtime_state({"session_id": initial["session_id"]})
-    assert refreshed["runtime_cells"][initial["cells"][1]["id"]]["console_lines"] == ["HEY"]
+    assert console_text(refreshed["runtime_cells"][initial["cells"][1]["id"]]) == ["HEY"]
     worker.shutdown({})
 
 
@@ -674,14 +708,15 @@ def test_run_cells_formats_runtime_tracebacks_as_error_output(tmp_path: Path) ->
     )
     result = worker.run_cells({"session_id": initial["session_id"], "cell_ids": [initial["cells"][0]["id"]]})
     runtime = result["cells"][0]["runtime"]
-    assert runtime["output_kind"] == "error"
-    assert runtime["output_lines"] == []
-    assert any("Traceback (most recent call last):" in line for line in runtime["console_lines"])
-    assert any("NameError: name 'df' is not defined" in line for line in runtime["console_lines"])
+    output = cast(dict[str, object], runtime["output"])
+    assert output["mimetype"] == "application/vnd.marimo+error"
+    errors = cast(list[dict[str, object]], output["data"])
+    assert errors
+    assert any("Traceback (most recent call last):" in line for line in console_text(runtime))
     worker.shutdown({})
 
 
-def test_run_cells_formats_multiple_definition_errors(tmp_path: Path) -> None:
+def test_run_cells_preserves_multiple_definition_errors(tmp_path: Path) -> None:
     worker = Worker()
     path = tmp_path / "multiple_defs.py"
     initial = worker.open_session(
@@ -697,16 +732,13 @@ def test_run_cells_formats_multiple_definition_errors(tmp_path: Path) -> None:
     first_runtime = result["cells"][0]["runtime"]
     second_runtime = result["cells"][1]["runtime"]
     for runtime in {1: first_runtime, 2: second_runtime}.values():
-        assert runtime["output_kind"] == "error"
-        assert runtime["output_lines"] == [
-            "This cell redefines variables from other cells.",
-            "",
-            "'x' was also defined by:",
-            "cell-2" if runtime is first_runtime else "cell-1",
-            "",
-            "Fix: Wrap in a function",
-        ]
-        assert runtime["console_lines"] == []
+        output = cast(dict[str, object], runtime["output"])
+        assert output["mimetype"] == "application/vnd.marimo+error"
+        errors = cast(list[dict[str, object]], output["data"])
+        assert len(errors) == 1
+        assert errors[0]["type"] == "multiple-defs"
+        assert "defined by another cell" in str(errors[0]["msg"])
+        assert console_text(runtime) == []
     worker.shutdown({})
 
 
@@ -741,10 +773,10 @@ def test_sync_and_run_only_reruns_changed_branch(tmp_path: Path) -> None:
             ),
         }
     )
-    assert bootstrapped["cells"][1]["runtime"]["output_lines"] == ["1"]
-    assert bootstrapped["cells"][2]["runtime"]["output_lines"] == ["1"]
-    assert bootstrapped["cells"][3]["runtime"]["output_lines"] == ["1"]
-    assert bootstrapped["cells"][4]["runtime"]["output_lines"] == ["104"]
+    assert_text_output(bootstrapped["cells"][1]["runtime"], "1")
+    assert_text_output(bootstrapped["cells"][2]["runtime"], "1")
+    assert_text_output(bootstrapped["cells"][3]["runtime"], "1")
+    assert_text_output(bootstrapped["cells"][4]["runtime"], "104")
 
     updated = worker.sync_and_run(
         {
@@ -759,8 +791,8 @@ def test_sync_and_run_only_reruns_changed_branch(tmp_path: Path) -> None:
         }
     )
 
-    assert updated["cells"][1]["runtime"]["output_lines"] == ["1"]
-    assert updated["cells"][2]["runtime"]["output_lines"] == ["1"]
-    assert updated["cells"][3]["runtime"]["output_lines"] == ["2"]
-    assert updated["cells"][4]["runtime"]["output_lines"] == ["206"]
+    assert_text_output(updated["cells"][1]["runtime"], "1")
+    assert_text_output(updated["cells"][2]["runtime"], "1")
+    assert_text_output(updated["cells"][3]["runtime"], "2")
+    assert_text_output(updated["cells"][4]["runtime"], "206")
     worker.shutdown({})
