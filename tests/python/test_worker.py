@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import json
+import subprocess
+import sys
+import time
 from pathlib import Path
 from typing import cast
 
@@ -260,6 +264,28 @@ def test_run_cells_populates_runtime_output(tmp_path: Path) -> None:
     worker.shutdown({})
 
 
+def test_run_cells_only_runs_selected_cell_and_its_ancestors(tmp_path: Path) -> None:
+    worker = Worker()
+    path = tmp_path / "runtime_ancestors.py"
+    initial = worker.open_session(
+        {
+            "path": str(path),
+            "content": "# + {marimo}\n\na = 1\na\n\n# +\n\nb = a + 1\nb\n\n# +\n\nc = 9\nc",
+            "input_kind": "projected",
+            "project_root": str(tmp_path),
+            "runtime_kind": "uv_project",
+        }
+    )
+    result = worker.run_cells({"session_id": initial["session_id"], "cell_ids": [initial["cells"][1]["id"]]})
+    first_runtime = result["cells"][0]["runtime"]
+    second_runtime = result["cells"][1]["runtime"]
+    third_runtime = result["cells"][2]["runtime"]
+    assert first_runtime["output_lines"] == ["1"]
+    assert second_runtime["output_lines"] == ["2"]
+    assert third_runtime["output_lines"] == []
+    worker.shutdown({})
+
+
 def test_sync_and_run_updates_descendant_outputs(tmp_path: Path) -> None:
     worker = Worker()
     path = tmp_path / "reactive.py"
@@ -360,6 +386,76 @@ def test_run_cells_emits_incremental_runtime_updates(tmp_path: Path) -> None:
         for event in runtime_events
     )
     worker.shutdown({})
+
+
+def test_interrupt_is_not_queued_behind_run_request(tmp_path: Path) -> None:
+    path = tmp_path / "runtime_interrupt.py"
+    worker_cmd = [sys.executable, "-m", "marimo_nvim_py.worker"]
+    process = subprocess.Popen(
+        worker_cmd,
+        cwd=str(Path(__file__).resolve().parents[2]),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+    )
+    stdin = process.stdin
+    stdout = process.stdout
+    assert stdin is not None
+    assert stdout is not None
+
+    def send_request(request_id: int, method: str, params: dict[str, object]) -> None:
+        stdin.write(json.dumps({"id": request_id, "method": method, "params": params}) + "\n")
+        stdin.flush()
+
+    try:
+        send_request(
+            1,
+            "open_session",
+            {
+                "path": str(path),
+                "content": "# + {marimo}\n\nimport time\ntime.sleep(2)\n1",
+                "input_kind": "projected",
+                "project_root": str(tmp_path),
+                "runtime_kind": "uv_project",
+            },
+        )
+        open_response = json.loads(stdout.readline())
+        assert open_response["id"] == 1
+        open_result = cast(dict[str, object], open_response["result"])
+        session_id = cast(str, open_result["session_id"])
+        open_cells = cast(list[dict[str, object]], open_result["cells"])
+
+        send_request(2, "run_cells", {"session_id": session_id, "cell_ids": [open_cells[0]["id"]]})
+        time.sleep(0.2)
+        interrupt_sent_at = time.monotonic()
+        send_request(3, "interrupt", {"session_id": session_id})
+
+        response_order: list[int] = []
+        interrupt_elapsed: float | None = None
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and len(response_order) < 2:
+            line = stdout.readline()
+            if not line:
+                break
+            payload = json.loads(line)
+            if payload.get("event") is not None:
+                continue
+            response_order.append(cast(int, payload["id"]))
+            if payload["id"] == 3:
+                interrupt_elapsed = time.monotonic() - interrupt_sent_at
+        assert response_order[:2] == [3, 2]
+        assert interrupt_elapsed is not None and interrupt_elapsed < 1.0
+    finally:
+        if process.stdin is not None:
+            process.stdin.close()
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
 
 
 def test_run_cells_resolves_relative_paths_from_notebook_directory(tmp_path: Path) -> None:

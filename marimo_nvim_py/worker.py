@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import queue
 import sys
+import threading
 from typing import Any
 
 from marimo_nvim_py.sessions import Worker
@@ -13,10 +15,17 @@ def _error(code: str, message: str) -> dict[str, Any]:
 
 def main() -> int:
     event_stdout = sys.__stdout__ or sys.stdout
+    write_lock = threading.Lock()
 
     def emit_event(payload: dict[str, Any]) -> None:
-        event_stdout.write(json.dumps(payload) + "\n")
-        event_stdout.flush()
+        with write_lock:
+            event_stdout.write(json.dumps(payload) + "\n")
+            event_stdout.flush()
+
+    def emit_response(payload: dict[str, Any]) -> None:
+        with write_lock:
+            sys.stdout.write(json.dumps(payload) + "\n")
+            sys.stdout.flush()
 
     worker = Worker(event_sink=emit_event)
     methods = {
@@ -38,26 +47,57 @@ def main() -> int:
         "get_projection_map": worker.get_projection_map,
         "shutdown": worker.shutdown,
     }
-    for raw in sys.stdin:
-        raw = raw.strip()
-        if not raw:
-            continue
-        request_id = None
+
+    request_queue: queue.Queue[dict[str, Any] | None] = queue.Queue()
+
+    def handle_payload(payload: dict[str, Any], *, allow_immediate_interrupt: bool = False) -> None:
+        request_id = payload.get("id")
         try:
-            payload = json.loads(raw)
-            request_id = payload.get("id")
             method = payload["method"]
             params = payload.get("params", {})
             params["_request_id"] = request_id
-            handler = methods.get(method)
+            if allow_immediate_interrupt and method == "interrupt":
+                handler = worker.interrupt_now
+            else:
+                handler = methods.get(method)
             if handler is None:
                 raise KeyError(f"unknown method: {method}")
             result = handler(params)
             response = {"id": request_id, "ok": True, "result": result}
         except Exception as exc:  # noqa: BLE001
             response = {"id": request_id, "ok": False, "error": _error("protocol_error", str(exc))}
-        sys.stdout.write(json.dumps(response) + "\n")
-        sys.stdout.flush()
+        emit_response(response)
+
+    def request_loop() -> None:
+        while True:
+            payload = request_queue.get()
+            if payload is None:
+                return
+            handle_payload(payload)
+
+    request_thread = threading.Thread(target=request_loop, daemon=True)
+    request_thread.start()
+
+    for raw in sys.stdin:
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            payload = json.loads(raw)
+        except Exception as exc:  # noqa: BLE001
+            emit_response({"id": None, "ok": False, "error": _error("protocol_error", str(exc))})
+            continue
+        if payload.get("method") == "interrupt":
+            interrupt_thread = threading.Thread(
+                target=handle_payload,
+                kwargs={"payload": payload, "allow_immediate_interrupt": True},
+                daemon=True,
+            )
+            interrupt_thread.start()
+            continue
+        request_queue.put(payload)
+    request_queue.put(None)
+    request_thread.join()
     return 0
 
 

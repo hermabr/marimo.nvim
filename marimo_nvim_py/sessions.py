@@ -16,12 +16,14 @@ from typing import Any, Callable, cast
 from marimo._ast.app import App, InternalApp
 from marimo._ast.cell import CellConfig
 from marimo._ast.codegen import generate_filecontents_from_ir
+from marimo._ast.compiler import compile_cell
 from marimo._ast.parse import parse_notebook
 from marimo._config.config import PartialMarimoConfig
 from marimo._config.manager import get_default_config_manager
 from marimo._messaging.notification import CompletedRunNotification
 from marimo._messaging.serde import deserialize_kernel_message
 from marimo._runtime.commands import AppMetadata, ExecuteCellsCommand, SyncGraphCommand
+from marimo._runtime.dataflow import DirectedGraph
 from marimo._schemas.serialization import AppInstantiation, CellDef, Header, NotebookSerializationV1
 from marimo._server.models.models import InstantiateNotebookRequest
 from marimo._session.consumer import SessionConsumer
@@ -29,6 +31,7 @@ from marimo._session.model import ConnectionState, SessionMode
 from marimo._session.notebook.file_manager import AppFileManager
 from marimo._session.session import SessionImpl
 from marimo._session.state.serialize import serialize_session_view
+from marimo._types.ids import CellId_t
 from marimo._types.ids import ConsumerId
 
 from marimo_nvim_py.models import Session
@@ -732,6 +735,24 @@ class Worker:
         deleted_ids = [cell["id"] for cell in previous_cells if cell["id"] not in current_ids]
         return changed_ids, deleted_ids
 
+    def _execution_closure(self, session: Session, requested_ids: list[str]) -> list[str]:
+        valid_ids = {cell["id"] for cell in session.cells}
+        requested = {cell_id for cell_id in requested_ids if cell_id in valid_ids}
+        if not requested:
+            return []
+        try:
+            graph = DirectedGraph()
+            for cell in session.cells:
+                graph.register_cell(cell["id"], compile_cell(cell["code"], cell_id=cell["id"]))
+        except Exception:  # noqa: BLE001
+            return [cell["id"] for cell in session.cells if cell["id"] in requested]
+
+        closure = set(requested)
+        for cell_id in requested:
+            if cell_id in graph.cells:
+                closure.update(cast(set[str], graph.ancestors(cast(CellId_t, cell_id))))
+        return [cell["id"] for cell in session.cells if cell["id"] in closure]
+
     def sync_runtime_graph(self, params: dict[str, Any]) -> dict[str, Any]:
         session = self.sessions[params["session_id"]]
         self.ensure_runtime_session({"session_id": session.session_id})
@@ -776,9 +797,7 @@ class Worker:
         if not requested_ids:
             return self._session_payload(session)
         code_by_id = {cell["id"]: cell["code"] for cell in session.cells}
-        runnable_ids = [cell_id for cell_id in requested_ids if cell_id in code_by_id]
-        if not session.runtime_bootstrapped:
-            runnable_ids = [cell["id"] for cell in session.cells]
+        runnable_ids = [cell_id for cell_id in self._execution_closure(session, requested_ids) if cell_id in code_by_id]
         if not runnable_ids:
             return self._session_payload(session)
         previous_completed_runs = session.runtime_consumer.completed_runs if session.runtime_consumer else 0
@@ -786,7 +805,10 @@ class Worker:
         with self._session_cwd(session):
             self._perform_runtime_operation(
                 lambda: session.runtime_session.put_control_request(
-                    ExecuteCellsCommand(cell_ids=list(runnable_ids), codes=[code_by_id[cell_id] for cell_id in runnable_ids]),
+                    ExecuteCellsCommand(
+                        cell_ids=[cast(CellId_t, cell_id) for cell_id in runnable_ids],
+                        codes=[code_by_id[cell_id] for cell_id in runnable_ids],
+                    ),
                     from_consumer_id=None,
                 )
             )
@@ -944,6 +966,12 @@ class Worker:
             session.runtime_session.flush_messages()
         self._refresh_runtime_cells(session)
         return self._session_payload(session)
+
+    def interrupt_now(self, params: dict[str, Any]) -> dict[str, Any]:
+        session = self.sessions[params["session_id"]]
+        if session.runtime_session is not None:
+            self._perform_runtime_operation(lambda: session.runtime_session.try_interrupt())
+        return self._with_runtime_payload(session)
 
     def close_session(self, params: dict[str, Any]) -> dict[str, Any]:
         session = self.sessions.pop(params["session_id"], None)
