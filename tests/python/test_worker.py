@@ -421,10 +421,10 @@ def test_run_cells_formats_runtime_tracebacks_as_error_output(tmp_path: Path) ->
     result = worker.run_cells({"session_id": initial["session_id"], "cell_ids": [initial["cells"][0]["id"]]})
     runtime = result["cells"][0]["runtime"]
     assert runtime["output_kind"] == "error"
-    assert runtime["console_lines"] == []
     assert not any("An internal error occurred:" in line for line in runtime["output_lines"])
-    assert any("Traceback (most recent call last):" in line for line in runtime["output_lines"])
-    assert any("NameError: name 'df' is not defined" in line for line in runtime["output_lines"])
+    assert runtime["output_lines"] == ["name 'df' is not defined"]
+    assert any("Traceback (most recent call last):" in line for line in runtime["console_lines"])
+    assert any("NameError: name 'df' is not defined" in line for line in runtime["console_lines"])
     worker.shutdown({})
 
 
