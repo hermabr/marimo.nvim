@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from marimo_nvim_py.projected import dedupe_empty_cells, parse_projected_cells, promote_first_marker_to_marimo
+from marimo_nvim_py.projected import dedupe_empty_cells, drop_empty_cells, parse_projected_cells, promote_first_marker_to_marimo
 from marimo_nvim_py.sessions import Worker
 
 
@@ -53,6 +53,29 @@ def test_dedupe_empty_cells() -> None:
     assert len(cells) == 2
     assert cells[0]["code"] == ""
     assert cells[1]["code"] == "x = 1"
+
+
+def test_drop_empty_cells() -> None:
+    cells = drop_empty_cells(
+        [
+            {"name": "_", "options": {}, "code": ""},
+            {"name": "_", "options": {}, "code": "x = 1"},
+            {"name": "_", "options": {}, "code": "   "},
+        ]
+    )
+    assert len(cells) == 1
+    assert cells[0]["code"] == "x = 1"
+
+
+def test_drop_empty_cells_preserves_one_when_all_empty() -> None:
+    cells = drop_empty_cells(
+        [
+            {"name": "_", "options": {}, "code": ""},
+            {"name": "_", "options": {}, "code": "   "},
+        ]
+    )
+    assert len(cells) == 1
+    assert cells[0]["code"] == ""
 
 
 def test_promote_first_marker_to_marimo() -> None:
@@ -130,6 +153,43 @@ def test_write_session_writes_canonical_marimo_source(tmp_path: Path) -> None:
     written = path.read_text(encoding="utf-8")
     assert "import marimo" in written
     assert "@app.cell" in written
+
+
+def test_open_session_from_raw_notebook_drops_empty_cells(tmp_path: Path) -> None:
+    worker = Worker()
+    path = tmp_path / "raw_with_empty.py"
+    raw = """\
+import marimo
+
+app = marimo.App()
+
+
+@app.cell
+def _():
+    x = 1
+    return (x,)
+
+
+@app.cell
+def _():
+    return
+
+
+if __name__ == "__main__":
+    app.run()
+"""
+    result = worker.open_session(
+        {
+            "path": str(path),
+            "content": raw,
+            "input_kind": "raw_marimo",
+            "project_root": str(tmp_path),
+            "runtime_kind": "uv_project",
+        }
+    )
+    assert len(result["cells"]) == 1
+    assert result["cells"][0]["code"] == "x = 1"
+    assert result["canonical_source"].count("@app.cell") == 1
 
 
 def test_sync_projection_preserves_existing_ids_when_inserting_first_cell(tmp_path: Path) -> None:

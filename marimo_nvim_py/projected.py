@@ -227,6 +227,17 @@ def dedupe_empty_cells(cells: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return deduped
 
 
+def drop_empty_cells(cells: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    kept = [cell for cell in cells if cell["code"].strip() != ""]
+    if kept:
+        return kept
+    if not cells:
+        return []
+    first = dict(cells[0])
+    first["code"] = ""
+    return [first]
+
+
 def render_projected_lines(cells: list[dict[str, Any]]) -> tuple[list[str], list[dict[str, int]]]:
     lines: list[str] = []
     spans: list[dict[str, int]] = []

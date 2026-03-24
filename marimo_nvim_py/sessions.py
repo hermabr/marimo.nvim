@@ -12,6 +12,7 @@ from marimo._schemas.serialization import AppInstantiation, CellDef, Header, Not
 
 from marimo_nvim_py.models import Session
 from marimo_nvim_py.projected import (
+    drop_empty_cells,
     dedupe_empty_cells,
     parse_projected_cells,
     promote_first_marker_to_marimo,
@@ -157,10 +158,10 @@ class Worker:
             }
             for cell in notebook.cells
         ]
-        return header, app_options, cells
+        return header, app_options, drop_empty_cells(cells)
 
     def _from_projection(self, lines: list[str], previous: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
-        parsed_cells = dedupe_empty_cells(parse_projected_cells(lines))
+        parsed_cells = drop_empty_cells(dedupe_empty_cells(parse_projected_cells(lines)))
         return self._reconcile_ids(previous, parsed_cells)
 
     def _from_manual_python(self, content: str) -> list[dict[str, Any]]:
