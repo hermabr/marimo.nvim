@@ -452,6 +452,33 @@ function M.activate(bufnr, opts)
 	util.notify("buffer is neither a real marimo notebook nor a projected `# +` notebook", vim.log.levels.WARN)
 end
 
+function M.reconcile_buffer(bufnr, opts)
+	opts = opts or {}
+	bufnr = bufnr or vim.api.nvim_get_current_buf()
+	if not state.is_enabled(bufnr) or not is_file_buffer(bufnr) then
+		return
+	end
+
+	local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+	if vim.b[bufnr].marimo_projected then
+		if markers.looks_like_projected(lines) then
+			if opts.ensure_projected_buffer_setup then
+				opts.ensure_projected_buffer_setup(bufnr)
+			end
+			render.render(bufnr, vim.b[bufnr].marimo_cells or {})
+			return
+		end
+		if markers.looks_like_marimo(lines) then
+			open_with_worker(bufnr, "raw_marimo", opts)
+		end
+		return
+	end
+
+	if markers.looks_like_marimo(lines) then
+		M.project_buffer(bufnr, opts)
+	end
+end
+
 function M.set_mode(enabled, opts)
 	opts = opts or {}
 	local bufnr = opts.bufnr or vim.api.nvim_get_current_buf()

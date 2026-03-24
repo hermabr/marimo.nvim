@@ -48,6 +48,22 @@ local function ensure_sync_autocmd(bufnr)
 	vim.b[bufnr].marimo_sync_hook = true
 end
 
+local function ensure_reconcile_autocmd(bufnr)
+	if vim.b[bufnr].marimo_reconcile_hook then
+		return
+	end
+	vim.api.nvim_create_autocmd({ "BufEnter", "FileChangedShellPost" }, {
+		group = group,
+		buffer = bufnr,
+		callback = function(args)
+			buffer.reconcile_buffer(args.buf, {
+				ensure_projected_buffer_setup = ensure_projected_buffer_setup,
+			})
+		end,
+	})
+	vim.b[bufnr].marimo_reconcile_hook = true
+end
+
 local function ensure_navigation_keymaps(bufnr)
 	if vim.b[bufnr].marimo_navigation_keymaps then
 		return
@@ -71,6 +87,7 @@ end
 local function ensure_projected_buffer_setup(bufnr)
 	ensure_write_autocmd(bufnr)
 	ensure_sync_autocmd(bufnr)
+	ensure_reconcile_autocmd(bufnr)
 	ensure_navigation_keymaps(bufnr)
 end
 
