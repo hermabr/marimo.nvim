@@ -21,6 +21,7 @@ class Session:
     runtime_session: Any = None
     runtime_consumer: Any = None
     runtime_cells: dict[str, Any] | None = None
+    persisted_console_lines: dict[str, list[str]] | None = None
     runtime_bootstrapped: bool = False
     autorun_generation: int = 0
     pending_changed_cell_ids: list[str] | None = None

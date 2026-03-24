@@ -406,6 +406,29 @@ def test_run_cells_attributes_stdout_to_the_emitting_cell(tmp_path: Path) -> Non
     worker.shutdown({})
 
 
+def test_run_cells_attributes_stdout_after_html_output_to_the_emitting_cell(tmp_path: Path) -> None:
+    worker = Worker()
+    path = tmp_path / "stdout_after_html.py"
+    initial = worker.open_session(
+        {
+            "path": str(path),
+            "content": '# + {marimo}\n\nimport marimo as mo\nmo.md("# hello")\n\n# +\n\nprint("HEY")',
+            "input_kind": "projected",
+            "project_root": str(tmp_path),
+            "runtime_kind": "uv_project",
+        }
+    )
+    result = worker.run_cells({"session_id": initial["session_id"], "cell_ids": [cell["id"] for cell in initial["cells"]]})
+    first_runtime = result["cells"][0]["runtime"]
+    second_runtime = result["cells"][1]["runtime"]
+    assert first_runtime["output_kind"] in {"text", "html", "widget"}
+    assert first_runtime["console_lines"] == []
+    assert second_runtime["console_lines"] == ["HEY"]
+    refreshed = worker.get_runtime_state({"session_id": initial["session_id"]})
+    assert refreshed["runtime_cells"][initial["cells"][1]["id"]]["console_lines"] == ["HEY"]
+    worker.shutdown({})
+
+
 def test_run_cells_formats_runtime_tracebacks_as_error_output(tmp_path: Path) -> None:
     worker = Worker()
     path = tmp_path / "runtime_nameerror.py"
@@ -425,6 +448,31 @@ def test_run_cells_formats_runtime_tracebacks_as_error_output(tmp_path: Path) ->
     assert not any("An internal error occurred:" in line for line in runtime["output_lines"])
     assert any("Traceback (most recent call last):" in line for line in runtime["output_lines"])
     assert any("NameError: name 'df' is not defined" in line for line in runtime["output_lines"])
+    worker.shutdown({})
+
+
+def test_run_cells_formats_multiple_definition_errors(tmp_path: Path) -> None:
+    worker = Worker()
+    path = tmp_path / "multiple_defs.py"
+    initial = worker.open_session(
+        {
+            "path": str(path),
+            "content": "# + {marimo}\n\nx = 1\n\n# +\n\nx = 2",
+            "input_kind": "projected",
+            "project_root": str(tmp_path),
+            "runtime_kind": "uv_project",
+        }
+    )
+    result = worker.run_cells({"session_id": initial["session_id"], "cell_ids": [cell["id"] for cell in initial["cells"]]})
+    first_runtime = result["cells"][0]["runtime"]
+    second_runtime = result["cells"][1]["runtime"]
+    for runtime in {1: first_runtime, 2: second_runtime}.values():
+        assert runtime["output_kind"] == "error"
+        assert runtime["console_lines"] == []
+        assert "This cell redefines variables from other cells." in runtime["output_lines"]
+        assert "'x' was also defined by:" in runtime["output_lines"]
+        assert "Fix: Wrap in a function" in runtime["output_lines"]
+        assert not any("An internal error occurred:" in line for line in runtime["output_lines"])
     worker.shutdown({})
 
 

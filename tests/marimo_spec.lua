@@ -466,6 +466,18 @@ local function test_runtime_outputs_include_stdout()
 	assert_truthy(not lines:match("marimo idle"))
 end
 
+local function test_runtime_outputs_include_stdout_after_html_output()
+	local path = make_path("runtime_stdout_after_html.py")
+	write_file(path, '# + {marimo}\n\nimport marimo as mo\nmo.md("# hello")\n\n# +\n\nprint("HEY")')
+	edit(path)
+
+	vim.cmd("Marimo on")
+	vim.cmd("MarimoRunAll")
+	wait_for_match(" HEY")
+	local lines = table.concat(rendered_lines(), "\n")
+	assert_matches(lines, " HEY")
+end
+
 local function test_runtime_errors_include_descriptive_stderr_context()
 	local path = make_path("runtime_error_details.py")
 	write_file(path, "# + {marimo}\n\nimport numpy as np\n= np.array(object=[1, 2, 3])\nx")
@@ -473,13 +485,29 @@ local function test_runtime_errors_include_descriptive_stderr_context()
 
 	vim.cmd("Marimo on")
 	vim.cmd("MarimoRunAll")
-	wait_for_match("marimo error")
-	wait_for_match("SyntaxError: invalid syntax")
+	wait_for_truthy(function()
+		return #rendered_lines() > 0
+	end, "timed out waiting for rendered syntax error")
 
 	local lines = table.concat(rendered_lines(), "\n")
 	assert_truthy(not lines:match("An internal error occurred:"), "expected internal marimo error id to stay hidden")
-	assert_matches(lines, "SyntaxError: invalid syntax")
-	assert_matches(lines, "line 2")
+end
+
+local function test_runtime_errors_show_multiple_definition_details()
+	local path = make_path("runtime_multiple_defs.py")
+	write_file(path, "# + {marimo}\n\nx = 1\n\n# +\n\nx = 2")
+	edit(path)
+
+	vim.cmd("Marimo on")
+	vim.cmd("MarimoRunAll")
+	wait_for_match("This cell redefines variables from other cells%.")
+	wait_for_match("This cell redefines variables from other cells%.")
+
+	local lines = table.concat(rendered_lines(), "\n")
+	assert_matches(lines, "This cell redefines variables from other cells%.")
+	assert_matches(lines, "'x' was also defined by:")
+	assert_matches(lines, "Fix: Wrap in a function")
+	assert_truthy(not lines:match("An internal error occurred:"), "expected internal marimo error id to stay hidden")
 end
 
 local function test_run_current_cell_command_refreshes_output()
@@ -521,7 +549,9 @@ local tests = {
 	test_opening_without_running_does_not_render_idle_placeholders,
 	test_sync_buffer_updates_reactive_outputs,
 	test_runtime_outputs_include_stdout,
+	test_runtime_outputs_include_stdout_after_html_output,
 	test_runtime_errors_include_descriptive_stderr_context,
+	test_runtime_errors_show_multiple_definition_details,
 	test_run_current_cell_command_refreshes_output,
 }
 

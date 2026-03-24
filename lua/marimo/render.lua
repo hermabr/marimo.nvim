@@ -55,9 +55,6 @@ local function has_visible_runtime(runtime)
 end
 
 local function status_label(runtime)
-	if runtime.output_kind == "error" then
-		return "marimo error"
-	end
 	if runtime.stale_inputs then
 		return "marimo stale"
 	end
@@ -65,9 +62,6 @@ local function status_label(runtime)
 end
 
 local function show_status_line(runtime)
-	if runtime.output_kind == "error" then
-		return true
-	end
 	if runtime.stale_inputs then
 		return true
 	end

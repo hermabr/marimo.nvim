@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import ast
 import contextlib
+import contextvars
 import hashlib
 import html
 import io
@@ -26,6 +28,7 @@ from marimo._messaging.errors import Error
 from marimo._messaging.notification import CompletedRunNotification
 from marimo._messaging.serde import deserialize_kernel_message
 from marimo._runtime.commands import AppMetadata, ExecuteCellsCommand, SyncGraphCommand
+from marimo._runtime import executor as runtime_executor
 from marimo._schemas.serialization import AppInstantiation, CellDef, Header, NotebookSerializationV1
 from marimo._server.models.models import InstantiateNotebookRequest
 from marimo._session.consumer import SessionConsumer
@@ -47,10 +50,54 @@ from marimo_nvim_py.projected import (
 MAX_OUTPUT_LINES = 12
 MAX_OUTPUT_LINE_CHARS = 160
 MIMEBUNDLE_TYPE = "application/vnd.marimo+mimebundle"
+CURRENT_EXECUTING_CELL_ID: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "marimo_nvim_current_executing_cell_id",
+    default=None,
+)
 
 
 def sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _install_execution_cell_tracking() -> None:
+    executor_cls = cast(Any, runtime_executor.DefaultExecutor)
+    if getattr(executor_cls, "_marimo_nvim_tracking_installed", False):
+        return
+
+    original_execute_cell = runtime_executor.DefaultExecutor.execute_cell
+    original_execute_cell_async = runtime_executor.DefaultExecutor.execute_cell_async
+
+    def execute_cell(
+        self: runtime_executor.DefaultExecutor,
+        cell: Any,
+        glbls: dict[str, Any],
+        graph: Any = None,
+    ) -> Any:
+        token = CURRENT_EXECUTING_CELL_ID.set(str(cell.cell_id))
+        try:
+            return original_execute_cell(self, cell, glbls, graph)
+        finally:
+            CURRENT_EXECUTING_CELL_ID.reset(token)
+
+    async def execute_cell_async(
+        self: runtime_executor.DefaultExecutor,
+        cell: Any,
+        glbls: dict[str, Any],
+        graph: Any = None,
+    ) -> Any:
+        token = CURRENT_EXECUTING_CELL_ID.set(str(cell.cell_id))
+        try:
+            return await original_execute_cell_async(self, cell, glbls, graph)
+        finally:
+            CURRENT_EXECUTING_CELL_ID.reset(token)
+
+    setattr(executor_cls, "execute_cell", execute_cell)
+    setattr(executor_cls, "execute_cell_async", execute_cell_async)
+    setattr(executor_cls, "_marimo_nvim_tracking_installed", True)
+
+
+_install_execution_cell_tracking()
 
 
 class RuntimeSessionConsumer(SessionConsumer):
@@ -136,6 +183,55 @@ def _merge_unique_lines(existing: list[str], extra: list[str]) -> list[str]:
     return merged
 
 
+def _collect_assigned_names(node: ast.AST) -> set[str]:
+    names: set[str] = set()
+
+    def visit_target(target: ast.AST) -> None:
+        if isinstance(target, ast.Name):
+            names.add(target.id)
+            return
+        if isinstance(target, (ast.Tuple, ast.List)):
+            for elt in target.elts:
+                visit_target(elt)
+
+    for current in ast.walk(node):
+        if isinstance(current, ast.Assign):
+            for target in current.targets:
+                visit_target(target)
+        elif isinstance(current, ast.AnnAssign):
+            visit_target(current.target)
+        elif isinstance(current, ast.AugAssign):
+            visit_target(current.target)
+        elif isinstance(current, (ast.For, ast.AsyncFor)):
+            visit_target(current.target)
+        elif isinstance(current, ast.With):
+            for item in current.items:
+                if item.optional_vars is not None:
+                    visit_target(item.optional_vars)
+        elif isinstance(current, ast.AsyncWith):
+            for item in current.items:
+                if item.optional_vars is not None:
+                    visit_target(item.optional_vars)
+        elif isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(current.name)
+        elif isinstance(current, ast.Import):
+            for alias in current.names:
+                names.add(alias.asname or alias.name.split(".")[0])
+        elif isinstance(current, ast.ImportFrom):
+            for alias in current.names:
+                if alias.name != "*":
+                    names.add(alias.asname or alias.name)
+    return names
+
+
+def _cell_defined_names(code: str) -> set[str]:
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return set()
+    return _collect_assigned_names(tree)
+
+
 def _format_error_runtime(runtime: dict[str, Any]) -> dict[str, Any]:
     if runtime.get("output_kind") != "error":
         return runtime
@@ -153,6 +249,51 @@ def _format_error_runtime(runtime: dict[str, Any]) -> dict[str, Any]:
 
 def _format_runtime_cells(runtime_cells: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
     return {cell_id: _format_error_runtime(dict(runtime)) for cell_id, runtime in runtime_cells.items()}
+
+
+def _has_visible_error_details(runtime: dict[str, Any]) -> bool:
+    if runtime.get("output_kind") != "error":
+        return False
+    return bool(runtime.get("output_lines") or runtime.get("console_lines"))
+
+
+def _normalize_console_snapshot(captured_console: dict[str, list[str]] | None) -> dict[str, list[str]]:
+    normalized: dict[str, list[str]] = {}
+    for cell_id, lines in (captured_console or {}).items():
+        trimmed = _truncate_lines(lines)
+        if trimmed:
+            normalized[cell_id] = trimmed
+    return normalized
+
+
+def _multiple_definition_details(cells: list[dict[str, Any]]) -> dict[str, list[str]]:
+    definitions: dict[str, list[int]] = {}
+    names_by_index: list[set[str]] = []
+    for index, cell in enumerate(cells):
+        names = _cell_defined_names(cell["code"])
+        names_by_index.append(names)
+        for name in names:
+            definitions.setdefault(name, []).append(index)
+
+    details: dict[str, list[str]] = {}
+    for index, cell in enumerate(cells):
+        conflicts: dict[str, list[int]] = {}
+        for name in names_by_index[index]:
+            other_indexes = [other for other in definitions.get(name, []) if other != index]
+            if other_indexes:
+                conflicts[name] = other_indexes
+        if not conflicts:
+            continue
+        lines = ["This cell redefines variables from other cells."]
+        for name in sorted(conflicts):
+            lines.append("")
+            lines.append(f"'{name}' was also defined by:")
+            for other_index in conflicts[name]:
+                lines.append(f"cell-{other_index + 1}")
+        lines.append("")
+        lines.append("Fix: Wrap in a function")
+        details[cell["id"]] = lines
+    return details
 
 
 def _placeholder(kind: str, mimetype: str) -> tuple[str, str]:
@@ -629,6 +770,42 @@ class Worker:
             merged[cell_id] = _format_error_runtime(runtime)
         return merged
 
+    def _persist_console_lines(
+        self,
+        session: Session,
+        captured_console: dict[str, list[str]] | None,
+    ) -> None:
+        persisted = dict(session.persisted_console_lines or {})
+        for cell_id, lines in _normalize_console_snapshot(captured_console).items():
+            persisted[cell_id] = lines
+        session.persisted_console_lines = persisted
+
+    def _clear_persisted_console_lines(self, session: Session, cell_ids: list[str]) -> None:
+        if not session.persisted_console_lines:
+            return
+        persisted = dict(session.persisted_console_lines)
+        for cell_id in cell_ids:
+            persisted.pop(cell_id, None)
+        session.persisted_console_lines = persisted
+
+    def _merge_persisted_console_lines(
+        self,
+        session: Session,
+        runtime_cells: dict[str, dict[str, Any]],
+    ) -> dict[str, dict[str, Any]]:
+        persisted = session.persisted_console_lines or {}
+        if not persisted:
+            return runtime_cells
+        merged = {cell_id: dict(runtime) for cell_id, runtime in runtime_cells.items()}
+        for cell_id, lines in persisted.items():
+            runtime = dict(merged.get(cell_id, _runtime_defaults()))
+            if runtime.get("console_lines"):
+                continue
+            runtime["console_lines"] = list(lines)
+            runtime["has_console"] = bool(lines)
+            merged[cell_id] = _format_error_runtime(runtime)
+        return merged
+
     def _merge_runtime_error_details(
         self,
         runtime_cells: dict[str, dict[str, Any]],
@@ -652,6 +829,49 @@ class Worker:
             if not details:
                 continue
             runtime["output_lines"] = _truncate_lines(_merge_unique_lines(output_lines, details))
+            merged[cell_id] = _format_error_runtime(runtime)
+        return merged
+
+    def _merge_multiple_definition_details(
+        self,
+        session: Session,
+        runtime_cells: dict[str, dict[str, Any]],
+    ) -> dict[str, dict[str, Any]]:
+        details = _multiple_definition_details(session.cells)
+        if not details:
+            return runtime_cells
+        merged = {cell_id: dict(runtime) for cell_id, runtime in runtime_cells.items()}
+        for cell_id, lines in details.items():
+            runtime = dict(merged.get(cell_id, _runtime_defaults()))
+            if runtime.get("output_kind") != "error":
+                continue
+            if runtime.get("output_lines") or runtime.get("console_lines"):
+                continue
+            runtime["output_lines"] = _truncate_lines(lines)
+            merged[cell_id] = _format_error_runtime(runtime)
+        return merged
+
+    def _preserve_error_details(
+        self,
+        previous_runtime_cells: dict[str, dict[str, Any]],
+        runtime_cells: dict[str, dict[str, Any]],
+    ) -> dict[str, dict[str, Any]]:
+        if not previous_runtime_cells:
+            return runtime_cells
+        merged = {cell_id: dict(runtime) for cell_id, runtime in runtime_cells.items()}
+        for cell_id, runtime in merged.items():
+            previous = previous_runtime_cells.get(cell_id)
+            if previous is None:
+                continue
+            if not _has_visible_error_details(previous):
+                continue
+            if runtime.get("output_kind") != "error":
+                continue
+            if _has_visible_error_details(runtime):
+                continue
+            runtime["output_lines"] = list(cast(list[str], previous.get("output_lines") or []))
+            runtime["console_lines"] = list(cast(list[str], previous.get("console_lines") or []))
+            runtime["has_console"] = bool(runtime["console_lines"])
             merged[cell_id] = _format_error_runtime(runtime)
         return merged
 
@@ -690,6 +910,8 @@ class Worker:
                 current_runtime = self._merge_captured_console(current_runtime, console_capture.snapshot())
             if log_capture is not None:
                 current_runtime = self._merge_runtime_error_details(current_runtime, log_capture.snapshot())
+            current_runtime = self._merge_multiple_definition_details(session, current_runtime)
+            current_runtime = self._merge_persisted_console_lines(session, current_runtime)
             session.runtime_cells = current_runtime
             changed = self._changed_runtime_cells(last_emitted, current_runtime)
             if changed:
@@ -715,6 +937,7 @@ class Worker:
 
     def _refresh_runtime_cells(self, session: Session) -> dict[str, dict[str, Any]]:
         runtime_cells: dict[str, dict[str, Any]] = {}
+        previous_runtime_cells = dict(session.runtime_cells or {})
         if session.runtime_session is None:
             session.runtime_cells = runtime_cells
             return runtime_cells
@@ -737,6 +960,9 @@ class Worker:
                 runtime["last_execution_time_ms"] = int(execution_time)
             runtime_cells[cell_id] = runtime
         runtime_cells = _format_runtime_cells(runtime_cells)
+        runtime_cells = self._preserve_error_details(previous_runtime_cells, runtime_cells)
+        runtime_cells = self._merge_multiple_definition_details(session, runtime_cells)
+        runtime_cells = self._merge_persisted_console_lines(session, runtime_cells)
         session.runtime_cells = runtime_cells
         return runtime_cells
 
@@ -758,6 +984,8 @@ class Worker:
 
     def _with_runtime_payload(self, session: Session) -> dict[str, Any]:
         runtime_cells = _format_runtime_cells(session.runtime_cells or {})
+        runtime_cells = self._merge_multiple_definition_details(session, runtime_cells)
+        runtime_cells = self._merge_persisted_console_lines(session, runtime_cells)
         session.runtime_cells = runtime_cells
         cells = [{**cell, "runtime": runtime_cells.get(cell["id"], _runtime_defaults())} for cell in session.cells]
         return {
@@ -879,8 +1107,10 @@ class Worker:
                 )
             )
             if run_ids or delete_ids:
+                self._clear_persisted_console_lines(session, list(run_ids) + list(delete_ids))
                 captured_console = _ConsoleCapture(
-                    current_cell_id=lambda: self._current_running_cell_id(session, run_ids),
+                    current_cell_id=lambda: CURRENT_EXECUTING_CELL_ID.get()
+                    or self._current_running_cell_id(session, run_ids),
                     fallback_cell_ids=run_ids,
                 )
                 captured_logs = _RuntimeLogCapture()
@@ -902,6 +1132,7 @@ class Worker:
                 session.runtime_cells = self._merge_captured_console(
                     session.runtime_cells or {}, captured_console.snapshot()
                 )
+                self._persist_console_lines(session, captured_console.snapshot())
                 session.runtime_cells = self._merge_runtime_error_details(
                     session.runtime_cells or {}, captured_logs.snapshot()
                 )
@@ -911,6 +1142,7 @@ class Worker:
         self._refresh_runtime_cells(session)
         if run_ids or delete_ids:
             session.runtime_cells = self._merge_captured_console(session.runtime_cells or {}, captured_console.snapshot())
+            self._persist_console_lines(session, captured_console.snapshot())
             session.runtime_cells = self._merge_runtime_error_details(session.runtime_cells or {}, captured_logs.snapshot())
         return self._with_runtime_payload(session)
 
@@ -930,6 +1162,7 @@ class Worker:
             return self._session_payload(session)
         previous_completed_runs = session.runtime_consumer.completed_runs if session.runtime_consumer else 0
         request_id = cast(int | None, params.get("_request_id"))
+        self._clear_persisted_console_lines(session, runnable_ids)
         with self._session_cwd(session):
             self._perform_runtime_operation(
                 lambda: session.runtime_session.put_control_request(
@@ -938,7 +1171,8 @@ class Worker:
                 )
             )
             captured_console = _ConsoleCapture(
-                current_cell_id=lambda: self._current_running_cell_id(session, runnable_ids),
+                current_cell_id=lambda: CURRENT_EXECUTING_CELL_ID.get()
+                or self._current_running_cell_id(session, runnable_ids),
                 fallback_cell_ids=runnable_ids,
             )
             captured_logs = _RuntimeLogCapture()
@@ -960,6 +1194,7 @@ class Worker:
         session.runtime_bootstrapped = True
         self._refresh_runtime_cells(session)
         session.runtime_cells = self._merge_captured_console(session.runtime_cells or {}, captured_console.snapshot())
+        self._persist_console_lines(session, captured_console.snapshot())
         session.runtime_cells = self._merge_runtime_error_details(session.runtime_cells or {}, captured_logs.snapshot())
         return self._with_runtime_payload(session)
 
@@ -1036,6 +1271,7 @@ class Worker:
             last_saved_source_hash=sha256_text(canonical_source),
             last_projection_hash=sha256_text("\n".join(projected_lines)),
             runtime_cells={},
+            persisted_console_lines={},
             runtime_bootstrapped=False,
             pending_changed_cell_ids=[],
         )
@@ -1101,6 +1337,7 @@ class Worker:
         session.runtime_session = None
         session.runtime_consumer = None
         session.runtime_cells = {}
+        session.persisted_console_lines = {}
         session.runtime_bootstrapped = False
         return self.ensure_runtime_session({"session_id": session.session_id})
 
