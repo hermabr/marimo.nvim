@@ -205,6 +205,27 @@ local function test_deactivation_clears_render_extmarks()
 	assert_eq(#vim.api.nvim_buf_get_extmarks(0, -1, 0, -1, {}), 0)
 end
 
+local function test_failed_deactivation_keeps_worker_session_alive()
+	local path = make_path("dirty_toggle.py")
+	write_file(path, PLAIN_PYTHON)
+	edit(path)
+
+	vim.cmd("Marimo")
+	assert_truthy(vim.b.marimo_projected)
+	local session_id = vim.b.marimo_session_id
+
+	vim.api.nvim_buf_set_lines(0, -1, -1, false, { "", "extra = 1" })
+	assert_truthy(vim.bo.modified)
+
+	vim.cmd("Marimo")
+	assert_truthy(vim.b.marimo_projected)
+	assert_eq(vim.b.marimo_session_id, session_id)
+
+	vim.cmd("write")
+	local content = read_file(path)
+	assert_matches(content, "extra = 1")
+end
+
 marimo.setup()
 
 local tests = {
@@ -216,6 +237,7 @@ local tests = {
 	test_manual_activation_uses_leading_text_as_first_cell_before_markers,
 	test_marimo_command_toggles_activation_in_one_step,
 	test_deactivation_clears_render_extmarks,
+	test_failed_deactivation_keeps_worker_session_alive,
 }
 
 for _, test in ipairs(tests) do

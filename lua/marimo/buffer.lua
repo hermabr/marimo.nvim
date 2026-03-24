@@ -183,12 +183,16 @@ function M.set_mode(enabled, opts)
 	if vim.b[bufnr].marimo_projected then
 		local session_id = vim.b[bufnr].marimo_session_id
 		local filepath = vim.api.nvim_buf_get_name(bufnr)
+		local ok, err = M.reload_raw_buffer(bufnr)
+		if not ok then
+			return ok, err
+		end
 		if session_id and filepath ~= "" then
 			worker.request(filepath, "close_session", {
 				session_id = session_id,
 			})
 		end
-		return M.reload_raw_buffer(bufnr)
+		return true
 	end
 
 	return true
