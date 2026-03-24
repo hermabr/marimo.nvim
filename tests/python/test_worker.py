@@ -321,40 +321,6 @@ def test_run_cells_does_not_rerun_non_stale_ancestors_after_bootstrap(tmp_path: 
     worker.shutdown({})
 
 
-def test_run_cells_reruns_stale_ancestors_after_sync_projection(tmp_path: Path) -> None:
-    worker = Worker()
-    path = tmp_path / "runtime_stale_ancestor.py"
-    initial = worker.open_session(
-        {
-            "path": str(path),
-            "content": "# + {marimo}\n\nx = 1\nx\n\n# +\n\ny = x + 1\ny\n\n# +\n\nz = y + 1\nz",
-            "input_kind": "projected",
-            "project_root": str(tmp_path),
-            "runtime_kind": "uv_project",
-        }
-    )
-    leaf_id = initial["cells"][2]["id"]
-
-    first = worker.run_cells({"session_id": initial["session_id"], "cell_ids": [leaf_id]})
-    assert first["cells"][0]["runtime"]["output_lines"] == ["1"]
-    assert first["cells"][1]["runtime"]["output_lines"] == ["2"]
-    assert first["cells"][2]["runtime"]["output_lines"] == ["3"]
-
-    synced = worker.sync_projection(
-        {
-            "session_id": initial["session_id"],
-            "content": "# + {marimo}\n\nx = 7\nx\n\n# +\n\ny = x + 1\ny\n\n# +\n\nz = y + 1\nz",
-        }
-    )
-    assert synced["cells"][0]["editor_status"] == "edited"
-
-    rerun = worker.run_cells({"session_id": initial["session_id"], "cell_ids": [leaf_id]})
-    assert rerun["cells"][0]["runtime"]["output_lines"] == ["7"]
-    assert rerun["cells"][1]["runtime"]["output_lines"] == ["8"]
-    assert rerun["cells"][2]["runtime"]["output_lines"] == ["9"]
-    worker.shutdown({})
-
-
 def test_sync_and_run_updates_descendant_outputs(tmp_path: Path) -> None:
     worker = Worker()
     path = tmp_path / "reactive.py"

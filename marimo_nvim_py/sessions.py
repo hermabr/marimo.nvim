@@ -621,15 +621,14 @@ class Worker:
         raise TimeoutError("timed out waiting for marimo runtime to finish")
 
     def _refresh_runtime_cells(self, session: Session) -> dict[str, dict[str, Any]]:
-        with session.runtime_lock:
-            if session.runtime_session is None:
-                session.runtime_cells = {}
-                return {}
-            session.runtime_session.flush_messages()
-            runtime_cells = self._serialized_runtime_cells(session)
-            runtime_cells = self._merge_multiple_definition_details(session, runtime_cells)
-            session.runtime_cells = runtime_cells
-            return runtime_cells
+        if session.runtime_session is None:
+            session.runtime_cells = {}
+            return {}
+        session.runtime_session.flush_messages()
+        runtime_cells = self._serialized_runtime_cells(session)
+        runtime_cells = self._merge_multiple_definition_details(session, runtime_cells)
+        session.runtime_cells = runtime_cells
+        return runtime_cells
 
     def _perform_runtime_operation(self, operation: Any) -> Any:
         return operation()
@@ -739,15 +738,6 @@ class Worker:
         deleted_ids = [cell["id"] for cell in previous_cells if cell["id"] not in current_ids]
         return changed_ids, deleted_ids
 
-    def _runtime_needs_execution(self, runtime: dict[str, Any] | None) -> bool:
-        if runtime is None:
-            return True
-        if runtime.get("stale_inputs"):
-            return True
-        if runtime.get("last_execution_time_ms") is None:
-            return True
-        return False
-
     def _execution_closure(self, session: Session, requested_ids: list[str], include_ancestors: bool) -> list[str]:
         valid_ids = {cell["id"] for cell in session.cells}
         requested = {cell_id for cell_id in requested_ids if cell_id in valid_ids}
@@ -762,18 +752,10 @@ class Worker:
         except Exception:  # noqa: BLE001
             return [cell["id"] for cell in session.cells if cell["id"] in requested]
 
-        pending_changed = set(session.pending_changed_cell_ids or [])
-        runtime_cells = session.runtime_cells or {}
         closure = set(requested)
         for cell_id in requested:
             if cell_id in graph.cells:
-                ancestors = cast(set[str], graph.ancestors(cast(CellId_t, cell_id)))
-                should_include_all_ancestors = self._runtime_needs_execution(runtime_cells.get(cell_id)) or any(
-                    ancestor_id in pending_changed for ancestor_id in ancestors
-                )
-                for ancestor_id in ancestors:
-                    if should_include_all_ancestors or self._runtime_needs_execution(runtime_cells.get(ancestor_id)):
-                        closure.add(ancestor_id)
+                closure.update(cast(set[str], graph.ancestors(cast(CellId_t, cell_id))))
         return [cell["id"] for cell in session.cells if cell["id"] in closure]
 
     def sync_runtime_graph(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -797,22 +779,19 @@ class Worker:
         previous_completed_runs = session.runtime_consumer.completed_runs if session.runtime_consumer else 0
         request_id = cast(int | None, params.get("_request_id"))
         with self._session_cwd(session):
-            with session.runtime_lock:
-                self._perform_runtime_operation(
-                    lambda: session.runtime_session.put_control_request(
-                        SyncGraphCommand(cells=dict(zip(cell_ids, codes)), run_ids=run_ids, delete_ids=delete_ids),
-                        from_consumer_id=None,
-                    )
+            self._perform_runtime_operation(
+                lambda: session.runtime_session.put_control_request(
+                    SyncGraphCommand(cells=dict(zip(cell_ids, codes)), run_ids=run_ids, delete_ids=delete_ids),
+                    from_consumer_id=None,
                 )
+            )
             if run_ids or delete_ids:
-                with session.runtime_lock:
-                    session.runtime_session.flush_messages()
+                session.runtime_session.flush_messages()
                 self._refresh_runtime_cells(session)
                 self._emit_session_update(session, request_id)
                 self._wait_for_completion(session, previous_completed_runs, request_id=request_id)
             else:
-                with session.runtime_lock:
-                    session.runtime_session.flush_messages()
+                session.runtime_session.flush_messages()
         session.last_runtime_sync_hash = sha256_text(json.dumps({"cell_ids": cell_ids, "codes": codes}, sort_keys=True))
         self._refresh_runtime_cells(session)
         return self._with_runtime_payload(session)
@@ -831,7 +810,7 @@ class Worker:
             for cell_id in self._execution_closure(
                 session,
                 requested_ids,
-                include_ancestors=True,
+                include_ancestors=not session.runtime_bootstrapped,
             )
             if cell_id in code_by_id
         ]
@@ -840,19 +819,17 @@ class Worker:
         previous_completed_runs = session.runtime_consumer.completed_runs if session.runtime_consumer else 0
         request_id = cast(int | None, params.get("_request_id"))
         with self._session_cwd(session):
-            with session.runtime_lock:
-                self._perform_runtime_operation(
-                    lambda: session.runtime_session.put_control_request(
-                        ExecuteCellsCommand(
-                            cell_ids=[cast(CellId_t, cell_id) for cell_id in runnable_ids],
-                            codes=[code_by_id[cell_id] for cell_id in runnable_ids],
-                        ),
-                        from_consumer_id=None,
-                    )
+            self._perform_runtime_operation(
+                lambda: session.runtime_session.put_control_request(
+                    ExecuteCellsCommand(
+                        cell_ids=[cast(CellId_t, cell_id) for cell_id in runnable_ids],
+                        codes=[code_by_id[cell_id] for cell_id in runnable_ids],
+                    ),
+                    from_consumer_id=None,
                 )
+            )
             self._wait_for_completion(session, previous_completed_runs, request_id=request_id)
         session.runtime_bootstrapped = True
-        session.pending_changed_cell_ids = []
         self._refresh_runtime_cells(session)
         return self._with_runtime_payload(session)
 
@@ -999,22 +976,17 @@ class Worker:
 
     def interrupt(self, params: dict[str, Any]) -> dict[str, Any]:
         session = self.sessions[params["session_id"]]
-        with session.runtime_lock:
-            if session.runtime_session is not None:
-                self._perform_runtime_operation(lambda: session.runtime_session.try_interrupt())
-                time.sleep(0.05)
-                session.runtime_session.flush_messages()
+        if session.runtime_session is not None:
+            self._perform_runtime_operation(lambda: session.runtime_session.try_interrupt())
+            time.sleep(0.05)
+            session.runtime_session.flush_messages()
         self._refresh_runtime_cells(session)
         return self._session_payload(session)
 
     def interrupt_now(self, params: dict[str, Any]) -> dict[str, Any]:
         session = self.sessions[params["session_id"]]
-        with session.runtime_lock:
-            if session.runtime_session is not None:
-                self._perform_runtime_operation(lambda: session.runtime_session.try_interrupt())
-                time.sleep(0.05)
-                session.runtime_session.flush_messages()
-        self._refresh_runtime_cells(session)
+        if session.runtime_session is not None:
+            self._perform_runtime_operation(lambda: session.runtime_session.try_interrupt())
         return self._with_runtime_payload(session)
 
     def close_session(self, params: dict[str, Any]) -> dict[str, Any]:

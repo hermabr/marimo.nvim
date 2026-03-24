@@ -546,25 +546,6 @@ local function test_run_current_cell_command_refreshes_output()
 	assert_matches(lines, " 7")
 end
 
-local function test_interrupt_clears_running_placeholder()
-	local path = make_path("runtime_interrupt_render.py")
-	write_file(path, "# + {marimo}\n\nimport time\ntime.sleep(5)\n1")
-	edit(path)
-
-	vim.cmd("Marimo on")
-	vim.cmd("MarimoRunAll")
-	wait_for_truthy(function()
-		local lines = table.concat(rendered_lines(), "\n")
-		return lines:match("marimo queued") ~= nil or lines:match("marimo running") ~= nil
-	end, "timed out waiting for running placeholder")
-
-	vim.cmd("MarimoInterrupt")
-	wait_for_truthy(function()
-		local lines = table.concat(rendered_lines(), "\n")
-		return not lines:match("marimo queued") and not lines:match("marimo running")
-	end, "timed out waiting for interrupt to clear running state", 5000)
-end
-
 marimo.setup()
 
 local tests = {
@@ -594,7 +575,6 @@ local tests = {
 	test_runtime_errors_include_descriptive_stderr_context,
 	test_runtime_errors_show_multiple_definition_details,
 	test_run_current_cell_command_refreshes_output,
-	test_interrupt_clears_running_placeholder,
 }
 
 for _, test in ipairs(tests) do
