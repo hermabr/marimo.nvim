@@ -18,3 +18,9 @@ class Session:
     projection_map: dict[str, Any]
     last_saved_source_hash: str
     last_projection_hash: str
+    runtime_session: Any = None
+    runtime_consumer: Any = None
+    runtime_cells: dict[str, Any] | None = None
+    autorun_generation: int = 0
+    pending_changed_cell_ids: list[str] | None = None
+    last_runtime_sync_hash: str | None = None

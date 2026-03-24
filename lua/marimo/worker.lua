@@ -73,7 +73,7 @@ local function ensure_worker(path)
 			end
 
 			local ok, decoded = pcall(vim.json.decode, worker.stdout_buffer)
-			if ok and decoded and decoded.id ~= nil then
+			if ok and type(decoded) == "table" and decoded.id ~= nil then
 				local pending = worker.pending[decoded.id]
 				if pending then
 					pending.response = decoded
@@ -86,7 +86,7 @@ local function ensure_worker(path)
 				local line = data[idx]
 				if line ~= "" then
 					local line_ok, line_decoded = pcall(vim.json.decode, line)
-					if line_ok and line_decoded and line_decoded.id ~= nil then
+					if line_ok and type(line_decoded) == "table" and line_decoded.id ~= nil then
 						local pending = worker.pending[line_decoded.id]
 						if pending then
 							pending.response = line_decoded

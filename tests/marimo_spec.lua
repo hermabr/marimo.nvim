@@ -345,6 +345,62 @@ local function test_jump_next_cell_appends_new_cell_and_enters_insert_mode()
 	assert_truthy(startinsert_called, "expected ]m at the last cell to request insert mode")
 end
 
+local function rendered_lines()
+	local marks = vim.api.nvim_buf_get_extmarks(0, -1, 0, -1, { details = true })
+	local lines = {}
+	for _, mark in ipairs(marks) do
+		local details = mark[4] or {}
+		for _, virt in ipairs(details.virt_lines or {}) do
+			local chunks = {}
+			for _, chunk in ipairs(virt) do
+				table.insert(chunks, chunk[1])
+			end
+			table.insert(lines, table.concat(chunks, ""))
+		end
+	end
+	return lines
+end
+
+local function test_runtime_outputs_render_below_cells()
+	local path = make_path("runtime_outputs.py")
+	write_file(path, "# + {marimo}\n\nx = 1\nx\n\n# +\n\ny = x + 1\ny")
+	edit(path)
+
+	vim.cmd("Marimo on")
+	local lines = table.concat(rendered_lines(), "\n")
+	assert_matches(lines, "marimo idle")
+	assert_matches(lines, " 1")
+	assert_matches(lines, " 2")
+end
+
+local function test_sync_buffer_updates_reactive_outputs()
+	local path = make_path("runtime_sync.py")
+	write_file(path, "# + {marimo}\n\nx = 1\nx\n\n# +\n\ny = x + 1\ny")
+	edit(path)
+
+	vim.cmd("Marimo on")
+	vim.api.nvim_buf_set_lines(0, 2, 3, false, { "x = 3" })
+	require("marimo").sync_buffer(0)
+
+	local lines = table.concat(rendered_lines(), "\n")
+	assert_matches(lines, " 3")
+	assert_matches(lines, " 4")
+end
+
+local function test_run_current_cell_command_refreshes_output()
+	local path = make_path("runtime_run_current.py")
+	write_file(path, "# + {marimo}\n\nx = 1\nx")
+	edit(path)
+
+	vim.cmd("Marimo on")
+	vim.api.nvim_buf_set_lines(0, 2, 3, false, { "x = 7" })
+	vim.api.nvim_win_set_cursor(0, { 3, 0 })
+	vim.cmd("MarimoRunCell")
+
+	local lines = table.concat(rendered_lines(), "\n")
+	assert_matches(lines, " 7")
+end
+
 marimo.setup()
 
 local tests = {
@@ -363,6 +419,9 @@ local tests = {
 	test_navigation_commands_jump_between_cells,
 	test_navigation_keymap_callbacks_work,
 	test_jump_next_cell_appends_new_cell_and_enters_insert_mode,
+	test_runtime_outputs_render_below_cells,
+	test_sync_buffer_updates_reactive_outputs,
+	test_run_current_cell_command_refreshes_output,
 }
 
 for _, test in ipairs(tests) do

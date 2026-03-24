@@ -220,3 +220,63 @@ def test_sync_projection_preserves_existing_ids_when_inserting_first_cell(tmp_pa
     assert updated["cells"][2]["id"] == old_b_id
     assert updated["cells"][1]["editor_status"] == "clean"
     assert updated["cells"][2]["editor_status"] == "clean"
+
+
+def test_open_session_populates_runtime_output(tmp_path: Path) -> None:
+    worker = Worker()
+    path = tmp_path / "runtime_output.py"
+    result = worker.open_session(
+        {
+            "path": str(path),
+            "content": "# + {marimo}\n\nx = 1\nx",
+            "input_kind": "projected",
+            "project_root": str(tmp_path),
+            "runtime_kind": "uv_project",
+        }
+    )
+    runtime = result["cells"][0]["runtime"]
+    assert runtime["status"] == "idle"
+    assert runtime["output_kind"] == "text"
+    assert runtime["output_lines"] == ["1"]
+    worker.shutdown({})
+
+
+def test_sync_and_run_updates_descendant_outputs(tmp_path: Path) -> None:
+    worker = Worker()
+    path = tmp_path / "reactive.py"
+    initial = worker.open_session(
+        {
+            "path": str(path),
+            "content": "# + {marimo}\n\nx = 1\nx\n\n# +\n\ny = x + 1\ny",
+            "input_kind": "projected",
+            "project_root": str(tmp_path),
+            "runtime_kind": "uv_project",
+        }
+    )
+    updated = worker.sync_and_run(
+        {
+            "session_id": initial["session_id"],
+            "content": "# + {marimo}\n\nx = 3\nx\n\n# +\n\ny = x + 1\ny",
+        }
+    )
+    assert updated["cells"][0]["runtime"]["output_lines"] == ["3"]
+    assert updated["cells"][1]["runtime"]["output_lines"] == ["4"]
+    worker.shutdown({})
+
+
+def test_html_output_is_summarized(tmp_path: Path) -> None:
+    worker = Worker()
+    path = tmp_path / "html_output.py"
+    result = worker.open_session(
+        {
+            "path": str(path),
+            "content": '# + {marimo}\n\nimport marimo as mo\nmo.md(\"# hello\")',
+            "input_kind": "projected",
+            "project_root": str(tmp_path),
+            "runtime_kind": "uv_project",
+        }
+    )
+    runtime = result["cells"][0]["runtime"]
+    assert runtime["output_kind"] in {"text", "html", "widget"}
+    assert runtime["output_summary"] is not None or runtime["output_lines"]
+    worker.shutdown({})
