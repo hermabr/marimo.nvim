@@ -176,6 +176,21 @@ local function test_manual_activation_uses_leading_text_as_first_cell_before_mar
 	assert_eq(vim.b.marimo_cells[3].code, "print(z)")
 end
 
+local function test_marimo_command_toggles_activation_in_one_step()
+	local path = make_path("toggle_plain_python.py")
+	write_file(path, PLAIN_PYTHON)
+	edit(path)
+
+	assert_truthy(not vim.b.marimo_projected)
+	vim.cmd("Marimo")
+	assert_truthy(vim.b.marimo_projected)
+	assert_eq(#vim.b.marimo_cells, 1)
+
+	vim.cmd("Marimo")
+	assert_truthy(not vim.b.marimo_projected)
+	assert_eq(vim.api.nvim_buf_get_lines(0, 0, -1, false)[1], "x = 1")
+end
+
 marimo.setup()
 
 local tests = {
@@ -185,6 +200,7 @@ local tests = {
 	test_generic_projected_notebook_is_promoted,
 	test_manual_activation_wraps_plain_python_in_one_cell,
 	test_manual_activation_uses_leading_text_as_first_cell_before_markers,
+	test_marimo_command_toggles_activation_in_one_step,
 }
 
 for _, test in ipairs(tests) do

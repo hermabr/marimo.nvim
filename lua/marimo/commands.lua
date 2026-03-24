@@ -27,17 +27,17 @@ function M.setup(opts)
 
 	vim.api.nvim_create_user_command("Marimo", function(command_opts)
 		local arg = vim.trim(command_opts.args)
-		if arg == "" then
-			arg = "toggle"
-		end
-
-		local enabled
+		local enabled = nil
 		if arg == "on" then
 			enabled = true
 		elseif arg == "off" then
 			enabled = false
-		elseif arg == "toggle" then
-			enabled = not state.is_enabled(0)
+		elseif arg == "" or arg == "toggle" then
+			if vim.b.marimo_projected then
+				enabled = false
+			else
+				enabled = true
+			end
 		else
 			util.notify("usage: MarimoMode [on|off|toggle]", vim.log.levels.ERROR)
 			return
