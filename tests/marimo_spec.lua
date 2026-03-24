@@ -251,6 +251,100 @@ local function test_manual_activation_preserves_dirty_state()
 	assert_eq(read_file(path), "x = 1")
 end
 
+local function test_normalize_projected_buffer_lines_deletes_empty_cells()
+	local normalized = private.normalize_projected_buffer_lines({
+		"# + {marimo}",
+		"",
+		"",
+		"# +",
+		"",
+		"",
+		"# +",
+		"",
+		"x = 1",
+		"",
+	})
+
+	assert_eq(
+		vim.inspect(normalized),
+		vim.inspect({
+			"# + {marimo}",
+			"",
+			"",
+			"# +",
+			"",
+			"x = 1",
+		})
+	)
+end
+
+local function test_navigation_commands_jump_between_cells()
+	local path = make_path("navigation.py")
+	write_file(path, "# + {marimo}\n\nx = 1\n\n# +\n\ny = 2\n")
+	edit(path)
+
+	vim.cmd("Marimo on")
+	vim.api.nvim_win_set_cursor(0, { 6, 0 })
+	vim.cmd("MarimoCellPrev")
+	assert_eq(vim.api.nvim_win_get_cursor(0)[1], 3)
+
+	vim.cmd("MarimoCellNext")
+	assert_eq(vim.api.nvim_win_get_cursor(0)[1], 7)
+end
+
+local function test_navigation_keymap_callbacks_work()
+	local path = make_path("navigation_keymaps.py")
+	write_file(path, "# + {marimo}\n\nx = 1\n\n# +\n\ny = 2\n")
+	edit(path)
+
+	vim.cmd("Marimo on")
+
+	local prev_map = vim.fn.maparg("[m", "n", false, true)
+	local next_map = vim.fn.maparg("]m", "n", false, true)
+
+	vim.api.nvim_win_set_cursor(0, { 6, 0 })
+	prev_map.callback()
+	assert_eq(vim.api.nvim_win_get_cursor(0)[1], 3)
+
+	next_map.callback()
+	assert_eq(vim.api.nvim_win_get_cursor(0)[1], 7)
+end
+
+local function test_jump_next_cell_appends_new_cell_and_enters_insert_mode()
+	local path = make_path("navigation_append.py")
+	write_file(path, "# + {marimo}\n\nx = 1\n")
+	edit(path)
+
+	vim.cmd("Marimo on")
+	vim.api.nvim_win_set_cursor(0, { 3, 0 })
+	local original_cmd = vim.cmd
+	local startinsert_called = false
+	vim.cmd = function(command)
+		if command == "startinsert" then
+			startinsert_called = true
+			return
+		end
+		return original_cmd(command)
+	end
+	vim.cmd("MarimoCellNext")
+	vim.cmd = original_cmd
+
+	assert_eq(
+		vim.inspect(vim.api.nvim_buf_get_lines(0, 0, -1, false)),
+		vim.inspect({
+			"# + {marimo}",
+			"",
+			"x = 1",
+			"",
+			"# +",
+			"",
+			"",
+		})
+	)
+	assert_eq(vim.api.nvim_win_get_cursor(0)[1], 7)
+	assert_truthy(startinsert_called, "expected ]m at the last cell to request insert mode")
+end
+
 marimo.setup()
 
 local tests = {
@@ -265,6 +359,10 @@ local tests = {
 	test_failed_deactivation_keeps_worker_session_alive,
 	test_manual_activation_rejects_unnamed_buffers,
 	test_manual_activation_preserves_dirty_state,
+	test_normalize_projected_buffer_lines_deletes_empty_cells,
+	test_navigation_commands_jump_between_cells,
+	test_navigation_keymap_callbacks_work,
+	test_jump_next_cell_appends_new_cell_and_enters_insert_mode,
 }
 
 for _, test in ipairs(tests) do

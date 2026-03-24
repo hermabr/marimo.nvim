@@ -125,6 +125,7 @@ M._private = {
 	has_any_projected_markers = markers.has_any_projected_markers,
 	as_json_object = util.as_json_object,
 	promote_first_marker_to_marimo = markers.promote_first_marker_to_marimo,
+	normalize_projected_buffer_lines = markers.normalize_projected_buffer_lines,
 	find_project_root = worker._private.find_project_root,
 	find_cell_start_rows = navigation.find_cell_start_rows,
 	first_content_row_after_marker = navigation.first_content_row_after_marker,

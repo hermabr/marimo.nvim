@@ -76,15 +76,12 @@ local function append_empty_cell(bufnr)
 
 	local lines = normalized_or_err or vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
 	local appended = vim.deepcopy(lines)
-	vim.list_extend(appended, { "", "# +", "" })
-
-	local ok2, normalized_appended_or_err = pcall(markers.normalize_projected_buffer_lines, appended)
-	if not ok2 then
-		return nil, normalized_appended_or_err
+	if #appended > 0 and appended[#appended] ~= "" then
+		table.insert(appended, "")
 	end
-
-	vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, normalized_appended_or_err)
-	return normalized_appended_or_err
+	vim.list_extend(appended, { "# +", "", "" })
+	vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, appended)
+	return appended
 end
 
 function M.jump_prev_cell(bufnr)
@@ -161,9 +158,11 @@ function M.jump_next_cell(bufnr)
 
 	local appended_starts = M.find_cell_start_rows(appended_lines)
 	local target_marker = appended_starts[#appended_starts]
-	vim.api.nvim_win_set_cursor(0, { M.first_content_row_after_marker(appended_lines, target_marker), 0 })
+	local target_row = math.min(target_marker + 2, vim.api.nvim_buf_line_count(bufnr))
+	vim.api.nvim_win_set_cursor(0, { target_row, 0 })
 	vim.cmd("normal! zz")
 	vim.cmd("nohlsearch")
+	vim.cmd("startinsert")
 end
 
 return M
