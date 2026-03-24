@@ -95,7 +95,8 @@ class Worker:
             key = (old["name"], json.dumps(old.get("options", {}), sort_keys=True), old["code"])
             previous_by_key.setdefault(key, []).append(old)
         matched_previous_ids: set[str] = set()
-        result: list[dict[str, Any]] = []
+        provisional: list[dict[str, Any]] = []
+        unmatched_new_indices: list[int] = []
         for idx, cell in enumerate(parsed_cells):
             key = (cell["name"], json.dumps(cell.get("options", {}), sort_keys=True), cell["code"])
             matched = None
@@ -106,12 +107,8 @@ class Worker:
                     matched = candidate
                     break
             if matched is None:
-                candidate_idx = min(idx, len(previous) - 1)
-                candidate = previous[candidate_idx] if previous else None
-                if candidate and candidate["id"] not in matched_previous_ids:
-                    matched = candidate
-            if matched is None:
-                result.append({**cell, "id": uuid.uuid4().hex, "editor_status": "edited"})
+                provisional.append({**cell})
+                unmatched_new_indices.append(idx)
             else:
                 matched_previous_ids.add(matched["id"])
                 status = (
@@ -121,8 +118,25 @@ class Worker:
                     and matched["name"] == cell["name"]
                     else "edited"
                 )
-                result.append({**cell, "id": matched["id"], "editor_status": status})
-        return result
+                provisional.append({**cell, "id": matched["id"], "editor_status": status})
+
+        remaining_previous = [cell for cell in previous if cell["id"] not in matched_previous_ids]
+        prev_pos = 0
+        for idx in unmatched_new_indices:
+            cell = provisional[idx]
+            matched = None
+            for search_idx in range(prev_pos, len(remaining_previous)):
+                candidate = remaining_previous[search_idx]
+                if candidate["name"] == cell["name"] and candidate.get("options", {}) == cell.get("options", {}):
+                    matched = candidate
+                    prev_pos = search_idx + 1
+                    break
+            if matched is None:
+                provisional[idx] = {**cell, "id": uuid.uuid4().hex, "editor_status": "edited"}
+            else:
+                provisional[idx] = {**cell, "id": matched["id"], "editor_status": "edited"}
+
+        return provisional
 
     def _from_raw_notebook(self, path: str, content: str) -> tuple[str | None, dict[str, Any], list[dict[str, Any]]]:
         notebook = parse_notebook(content, filepath=path)

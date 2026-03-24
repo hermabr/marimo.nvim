@@ -130,3 +130,33 @@ def test_write_session_writes_canonical_marimo_source(tmp_path: Path) -> None:
     written = path.read_text(encoding="utf-8")
     assert "import marimo" in written
     assert "@app.cell" in written
+
+
+def test_sync_projection_preserves_existing_ids_when_inserting_first_cell(tmp_path: Path) -> None:
+    worker = Worker()
+    path = tmp_path / "insert_before.py"
+    initial = worker.open_session(
+        {
+            "path": str(path),
+            "content": "# + {marimo}\n\na = 1\n\n# +\n\nb = 2",
+            "input_kind": "projected",
+            "project_root": str(tmp_path),
+            "runtime_kind": "uv_project",
+        }
+    )
+    old_a_id = initial["cells"][0]["id"]
+    old_b_id = initial["cells"][1]["id"]
+
+    updated = worker.sync_projection(
+        {
+            "session_id": initial["session_id"],
+            "content": "# + {marimo}\n\nx = 0\n\n# +\n\na = 1\n\n# +\n\nb = 2",
+        }
+    )
+
+    assert len(updated["cells"]) == 3
+    assert updated["cells"][0]["id"] not in {old_a_id, old_b_id}
+    assert updated["cells"][1]["id"] == old_a_id
+    assert updated["cells"][2]["id"] == old_b_id
+    assert updated["cells"][1]["editor_status"] == "clean"
+    assert updated["cells"][2]["editor_status"] == "clean"
