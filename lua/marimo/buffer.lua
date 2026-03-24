@@ -143,6 +143,10 @@ function M.activate(bufnr, opts)
 		util.notify("marimo mode is disabled for this buffer", vim.log.levels.WARN)
 		return
 	end
+	if not is_file_buffer(bufnr) then
+		util.notify("current buffer is not a file buffer", vim.log.levels.WARN)
+		return
+	end
 	local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
 
 	if markers.looks_like_marimo(lines) then

@@ -226,6 +226,16 @@ local function test_failed_deactivation_keeps_worker_session_alive()
 	assert_matches(content, "extra = 1")
 end
 
+local function test_manual_activation_rejects_unnamed_buffers()
+	vim.cmd("silent! %bwipeout!")
+	vim.cmd("enew")
+	vim.api.nvim_buf_set_lines(0, 0, -1, false, { "x = 1" })
+
+	vim.cmd("Marimo")
+	assert_truthy(not vim.b.marimo_projected)
+	assert_eq(vim.b.marimo_session_id, nil)
+end
+
 marimo.setup()
 
 local tests = {
@@ -238,6 +248,7 @@ local tests = {
 	test_marimo_command_toggles_activation_in_one_step,
 	test_deactivation_clears_render_extmarks,
 	test_failed_deactivation_keeps_worker_session_alive,
+	test_manual_activation_rejects_unnamed_buffers,
 }
 
 for _, test in ipairs(tests) do
