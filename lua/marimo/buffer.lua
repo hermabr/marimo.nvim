@@ -10,6 +10,15 @@ local lsp_bridge = dofile(dir .. "/lsp_bridge.lua")
 local navigation = dofile(dir .. "/navigation.lua")
 
 local M = {}
+local runtime_state = {}
+
+local function state_for(bufnr)
+	runtime_state[bufnr] = runtime_state[bufnr] or {
+		timer = nil,
+		request_id = 0,
+	}
+	return runtime_state[bufnr]
+end
 
 local function is_file_buffer(bufnr)
 	local name = vim.api.nvim_buf_get_name(bufnr)
@@ -17,11 +26,12 @@ local function is_file_buffer(bufnr)
 end
 
 local function stop_autorun_timer(bufnr)
-	local timer = vim.b[bufnr].marimo_autorun_timer
+	local entry = state_for(bufnr)
+	local timer = entry.timer
 	if timer then
 		timer:stop()
 		timer:close()
-		vim.b[bufnr].marimo_autorun_timer = nil
+		entry.timer = nil
 	end
 end
 
@@ -34,6 +44,36 @@ local function apply_runtime_payload(bufnr, payload)
 	render.render(bufnr, payload.cells)
 end
 
+local function merge_runtime_cells(bufnr, runtime_cells)
+	local cells = vim.b[bufnr].marimo_cells or {}
+	local by_id = vim.b[bufnr].marimo_runtime_cells or {}
+	for cell_id, runtime in pairs(runtime_cells or {}) do
+		by_id[cell_id] = runtime
+	end
+	vim.b[bufnr].marimo_runtime_cells = by_id
+	for _, cell in ipairs(cells) do
+		if by_id[cell.id] ~= nil then
+			cell.runtime = by_id[cell.id]
+		end
+	end
+	render.render(bufnr, cells)
+end
+
+local function mark_cells_pending(bufnr, cell_ids)
+	local current = vim.b[bufnr].marimo_runtime_cells or {}
+	local updates = {}
+	for _, cell_id in ipairs(cell_ids or {}) do
+		local runtime = vim.deepcopy(current[cell_id] or {})
+		runtime.status = runtime.status == "running" and "running" or "queued"
+		runtime.stale_inputs = false
+		runtime.output_kind = runtime.output_kind or "empty"
+		runtime.output_lines = runtime.output_lines or {}
+		runtime.console_lines = runtime.console_lines or {}
+		updates[cell_id] = runtime
+	end
+	merge_runtime_cells(bufnr, updates)
+end
+
 local function apply_projection_payload(bufnr, payload, keep_modified)
 	local current = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
 	if vim.deep_equal(current, payload.projected_lines or {}) == false then
@@ -42,6 +82,48 @@ local function apply_projection_payload(bufnr, payload, keep_modified)
 	apply_runtime_payload(bufnr, payload)
 	lsp_bridge.sync_mirror(bufnr, payload.canonical_source)
 	vim.bo[bufnr].modified = keep_modified and true or false
+end
+
+local function handle_async_payload(bufnr, generation, keep_modified, payload, err)
+	if err then
+		util.notify(err, vim.log.levels.ERROR)
+		return
+	end
+	if not vim.api.nvim_buf_is_valid(bufnr) then
+		return
+	end
+	if generation and state_for(bufnr).request_id ~= generation then
+		return
+	end
+	apply_projection_payload(bufnr, payload, keep_modified)
+end
+
+local function handle_async_runtime_payload(bufnr, request_id, payload, err)
+	if err then
+		util.notify(err, vim.log.levels.ERROR)
+		return
+	end
+	if not vim.api.nvim_buf_is_valid(bufnr) then
+		return
+	end
+	if request_id and state_for(bufnr).request_id ~= request_id then
+		return
+	end
+	apply_runtime_payload(bufnr, payload)
+end
+
+local function handle_async_runtime_event(bufnr, request_id, event)
+	if not vim.api.nvim_buf_is_valid(bufnr) then
+		return
+	end
+	if request_id and state_for(bufnr).request_id ~= request_id then
+		return
+	end
+	if type(event) ~= "table" or event.event ~= "runtime_update" then
+		return
+	end
+	local payload = event.payload or {}
+	merge_runtime_cells(bufnr, payload.runtime_cells or {})
 end
 
 function M.reload_raw_buffer(bufnr)
@@ -56,6 +138,7 @@ function M.reload_raw_buffer(bufnr)
 	local raw_lines = vim.fn.readfile(filepath)
 	vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, raw_lines)
 	stop_autorun_timer(bufnr)
+	runtime_state[bufnr] = nil
 	render.clear(bufnr)
 	state.clear_projected_state(bufnr)
 	vim.bo[bufnr].modified = false
@@ -122,18 +205,29 @@ function M.write_buffer(bufnr)
 		return
 	end
 
-	local payload, err = worker.request(filepath, "write_session", {
-		session_id = vim.b[bufnr].marimo_session_id,
+	local changedtick = vim.api.nvim_buf_get_changedtick(bufnr)
+	worker.request_isolated_async(filepath, "write_projection", {
+		path = filepath,
 		content = util.join_lines(lines),
-	})
-	if err then
-		util.notify("failed to write marimo notebook: " .. err, vim.log.levels.ERROR)
-		return
-	end
-
-	apply_projection_payload(bufnr, payload, false)
-	vim.api.nvim_exec_autocmds("BufWritePost", { buffer = bufnr, modeline = false })
-	util.show_write_message(bufnr)
+		header = vim.b[bufnr].marimo_header,
+		app_options = vim.b[bufnr].marimo_app_options or vim.empty_dict(),
+	}, function(payload, err)
+		if err then
+			util.notify("failed to write marimo notebook: " .. err, vim.log.levels.ERROR)
+			return
+		end
+		if not vim.api.nvim_buf_is_valid(bufnr) then
+			return
+		end
+		vim.b[bufnr].marimo_canonical_source = payload.canonical_source or vim.b[bufnr].marimo_canonical_source
+		vim.b[bufnr].marimo_last_saved_source_hash = payload.last_saved_source_hash
+		lsp_bridge.sync_mirror(bufnr, vim.b[bufnr].marimo_canonical_source)
+		if vim.api.nvim_buf_get_changedtick(bufnr) == changedtick then
+			vim.bo[bufnr].modified = false
+		end
+		vim.api.nvim_exec_autocmds("BufWritePost", { buffer = bufnr, modeline = false })
+		util.show_write_message(bufnr)
+	end)
 end
 
 function M.sync_buffer(bufnr, opts)
@@ -142,6 +236,7 @@ function M.sync_buffer(bufnr, opts)
 	if not vim.b[bufnr].marimo_projected or not vim.b[bufnr].marimo_session_id then
 		return
 	end
+	local keep_modified = vim.bo[bufnr].modified
 	local filepath = vim.api.nvim_buf_get_name(bufnr)
 	local method = opts.autorun == false and "sync_projection" or "sync_and_run"
 	local payload, err = worker.request(filepath, method, {
@@ -152,10 +247,10 @@ function M.sync_buffer(bufnr, opts)
 		util.notify("failed to sync marimo projection: " .. err, vim.log.levels.ERROR)
 		return
 	end
-	if opts.generation and vim.b[bufnr].marimo_last_runtime_request_id ~= opts.generation then
+	if opts.generation and state_for(bufnr).request_id ~= opts.generation then
 		return
 	end
-	apply_projection_payload(bufnr, payload, true)
+	apply_projection_payload(bufnr, payload, keep_modified)
 end
 
 function M.schedule_sync(bufnr, opts)
@@ -165,20 +260,30 @@ function M.schedule_sync(bufnr, opts)
 		return
 	end
 	stop_autorun_timer(bufnr)
-	vim.b[bufnr].marimo_last_runtime_request_id = (vim.b[bufnr].marimo_last_runtime_request_id or 0) + 1
-	local generation = vim.b[bufnr].marimo_last_runtime_request_id
+	local entry = state_for(bufnr)
+	entry.request_id = entry.request_id + 1
+	local generation = entry.request_id
 	local delay = opts.immediate and 0 or 300
 	local timer = vim.uv.new_timer()
-	vim.b[bufnr].marimo_autorun_timer = timer
+	entry.timer = timer
 	timer:start(delay, 0, function()
 		vim.schedule(function()
 			if not vim.api.nvim_buf_is_valid(bufnr) then
 				return
 			end
-			if vim.b[bufnr].marimo_last_runtime_request_id ~= generation then
+			if state_for(bufnr).request_id ~= generation then
 				return
 			end
-			M.sync_buffer(bufnr, { generation = generation })
+			local keep_modified = vim.bo[bufnr].modified
+			local filepath = vim.api.nvim_buf_get_name(bufnr)
+			worker.request_async(filepath, "sync_and_run", {
+				session_id = vim.b[bufnr].marimo_session_id,
+				content = util.join_lines(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)),
+			}, function(payload, err)
+				handle_async_payload(bufnr, generation, keep_modified, payload, err)
+			end, function(event)
+				handle_async_runtime_event(bufnr, generation, event)
+			end)
 		end)
 	end)
 end
@@ -189,20 +294,24 @@ function M.run_all_cells(bufnr)
 		return
 	end
 	M.sync_buffer(bufnr, { autorun = false })
+	stop_autorun_timer(bufnr)
+	local entry = state_for(bufnr)
+	entry.request_id = entry.request_id + 1
+	local request_id = entry.request_id
 	local filepath = vim.api.nvim_buf_get_name(bufnr)
 	local cell_ids = {}
 	for _, cell in ipairs(vim.b[bufnr].marimo_cells or {}) do
 		table.insert(cell_ids, cell.id)
 	end
-	local payload, err = worker.request(filepath, "run_cells", {
+	mark_cells_pending(bufnr, cell_ids)
+	worker.request_async(filepath, "run_cells", {
 		session_id = vim.b[bufnr].marimo_session_id,
 		cell_ids = cell_ids,
-	})
-	if err then
-		util.notify("failed to run marimo cells: " .. err, vim.log.levels.ERROR)
-		return
-	end
-	apply_runtime_payload(bufnr, payload)
+	}, function(payload, err)
+		handle_async_runtime_payload(bufnr, request_id, payload, err)
+	end, function(event)
+		handle_async_runtime_event(bufnr, request_id, event)
+	end)
 end
 
 function M.run_current_cell(bufnr)
@@ -216,16 +325,20 @@ function M.run_current_cell(bufnr)
 		util.notify("no current marimo cell", vim.log.levels.WARN)
 		return
 	end
+	stop_autorun_timer(bufnr)
+	local entry = state_for(bufnr)
+	entry.request_id = entry.request_id + 1
+	local request_id = entry.request_id
 	local filepath = vim.api.nvim_buf_get_name(bufnr)
-	local payload, err = worker.request(filepath, "run_cells", {
+	mark_cells_pending(bufnr, { cell.id })
+	worker.request_async(filepath, "run_cells", {
 		session_id = vim.b[bufnr].marimo_session_id,
 		cell_ids = { cell.id },
-	})
-	if err then
-		util.notify("failed to run marimo cell: " .. err, vim.log.levels.ERROR)
-		return
-	end
-	apply_runtime_payload(bufnr, payload)
+	}, function(payload, err)
+		handle_async_runtime_payload(bufnr, request_id, payload, err)
+	end, function(event)
+		handle_async_runtime_event(bufnr, request_id, event)
+	end)
 end
 
 function M.interrupt(bufnr)
@@ -233,15 +346,15 @@ function M.interrupt(bufnr)
 	if not vim.b[bufnr].marimo_projected or not vim.b[bufnr].marimo_session_id then
 		return
 	end
+	local entry = state_for(bufnr)
+	entry.request_id = entry.request_id + 1
+	local request_id = entry.request_id
 	local filepath = vim.api.nvim_buf_get_name(bufnr)
-	local payload, err = worker.request(filepath, "interrupt", {
+	worker.request_async(filepath, "interrupt", {
 		session_id = vim.b[bufnr].marimo_session_id,
-	})
-	if err then
-		util.notify("failed to interrupt marimo runtime: " .. err, vim.log.levels.ERROR)
-		return
-	end
-	apply_runtime_payload(bufnr, payload)
+	}, function(payload, err)
+		handle_async_runtime_payload(bufnr, request_id, payload, err)
+	end)
 end
 
 function M.activate(bufnr, opts)
@@ -304,6 +417,7 @@ function M.set_mode(enabled, opts)
 				session_id = session_id,
 			})
 		end
+		runtime_state[bufnr] = nil
 		return true
 	end
 

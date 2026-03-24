@@ -12,12 +12,19 @@ def _error(code: str, message: str) -> dict[str, Any]:
 
 
 def main() -> int:
-    worker = Worker()
+    event_stdout = sys.__stdout__ or sys.stdout
+
+    def emit_event(payload: dict[str, Any]) -> None:
+        event_stdout.write(json.dumps(payload) + "\n")
+        event_stdout.flush()
+
+    worker = Worker(event_sink=emit_event)
     methods = {
         "open_session": worker.open_session,
         "sync_projection": worker.sync_projection,
         "sync_and_run": worker.sync_and_run,
         "write_session": worker.write_session,
+        "write_projection": worker.write_projection,
         "reload_from_disk": worker.reload_from_disk,
         "ensure_runtime_session": worker.ensure_runtime_session,
         "sync_runtime_graph": worker.sync_runtime_graph,
@@ -41,6 +48,7 @@ def main() -> int:
             request_id = payload.get("id")
             method = payload["method"]
             params = payload.get("params", {})
+            params["_request_id"] = request_id
             handler = methods.get(method)
             if handler is None:
                 raise KeyError(f"unknown method: {method}")

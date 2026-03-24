@@ -6,11 +6,14 @@ import hashlib
 import html
 import io
 import json
+import logging
+import os
+import threading
 import re
 import time
 import uuid
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Callable, cast
 
 from marimo._ast.app import App, InternalApp
 from marimo._ast.cell import CellConfig
@@ -20,11 +23,7 @@ from marimo._config.config import PartialMarimoConfig
 from marimo._config.manager import get_default_config_manager
 from marimo._messaging.cell_output import CellChannel, CellOutput
 from marimo._messaging.errors import Error
-from marimo._messaging.notification import (
-    CompletedRunNotification,
-    UpdateCellCodesNotification,
-    UpdateCellIdsNotification,
-)
+from marimo._messaging.notification import CompletedRunNotification
 from marimo._messaging.serde import deserialize_kernel_message
 from marimo._runtime.commands import AppMetadata, ExecuteCellsCommand, SyncGraphCommand
 from marimo._schemas.serialization import AppInstantiation, CellDef, Header, NotebookSerializationV1
@@ -118,6 +117,42 @@ def _split_text_output(data: str) -> list[str]:
 
 def _error_lines(errors: list[Error]) -> list[str]:
     return _truncate_lines([error.describe() for error in errors])
+
+
+def _internal_error_id(line: str) -> str | None:
+    match = re.search(r"An internal error occurred:\s*([0-9a-f-]+)", line)
+    if match is None:
+        return None
+    return match.group(1)
+
+
+def _merge_unique_lines(existing: list[str], extra: list[str]) -> list[str]:
+    merged = list(existing)
+    seen = set(existing)
+    for line in extra:
+        if line not in seen:
+            merged.append(line)
+            seen.add(line)
+    return merged
+
+
+def _format_error_runtime(runtime: dict[str, Any]) -> dict[str, Any]:
+    if runtime.get("output_kind") != "error":
+        return runtime
+    formatted = dict(runtime)
+    output_lines = list(cast(list[str], formatted.get("output_lines") or []))
+    console_lines = [str(line).removeprefix("stderr: ") for line in cast(list[str], formatted.get("console_lines") or [])]
+    visible_output = [line for line in output_lines if _internal_error_id(line) is None]
+    if console_lines:
+        visible_output = _merge_unique_lines(visible_output, console_lines)
+    formatted["output_lines"] = _truncate_lines(visible_output)
+    formatted["console_lines"] = []
+    formatted["has_console"] = False
+    return formatted
+
+
+def _format_runtime_cells(runtime_cells: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    return {cell_id: _format_error_runtime(dict(runtime)) for cell_id, runtime in runtime_cells.items()}
 
 
 def _placeholder(kind: str, mimetype: str) -> tuple[str, str]:
@@ -241,19 +276,138 @@ def _runtime_defaults() -> dict[str, Any]:
     }
 
 
-class Worker:
+class _ConsoleCapture:
+    def __init__(self, current_cell_id: Callable[[], str | None], fallback_cell_ids: list[str] | None = None) -> None:
+        self._current_cell_id = current_cell_id
+        self._fallback_cell_ids = list(fallback_cell_ids or [])
+        self._lines: dict[str, list[str]] = {}
+        self._partials: dict[str, str] = {}
+        self._pending_lines: list[str] = []
+        self._pending_partial = ""
+        self._lock = threading.Lock()
+
+    def _target_cell_id(self) -> str | None:
+        return self._current_cell_id()
+
+    def _append(self, target: str | None, text: str) -> None:
+        if text == "":
+            return
+        if target is None:
+            partial = self._pending_partial
+        else:
+            partial = self._partials.get(target, "")
+        chunks = text.split("\n")
+        chunks[0] = partial + chunks[0]
+        complete = chunks[:-1]
+        if target is None:
+            self._pending_partial = chunks[-1]
+        else:
+            self._partials[target] = chunks[-1]
+        if complete:
+            if target is None:
+                self._pending_lines.extend(complete)
+            else:
+                self._lines.setdefault(target, []).extend(complete)
+
+    def bind(self, cell_id: str | None) -> None:
+        if cell_id is None:
+            return
+        with self._lock:
+            if self._pending_lines:
+                self._lines.setdefault(cell_id, []).extend(self._pending_lines)
+                self._pending_lines = []
+            if self._pending_partial != "":
+                self._partials[cell_id] = self._partials.get(cell_id, "") + self._pending_partial
+                self._pending_partial = ""
+
+    def stdout_writer(self) -> Any:
+        capture = self
+
+        class _Writer:
+            def write(self, text: str) -> int:
+                with capture._lock:
+                    capture._append(capture._target_cell_id(), text)
+                return len(text)
+
+            def flush(self) -> None:
+                return None
+
+        return _Writer()
+
+    def stderr_writer(self) -> Any:
+        capture = self
+
+        class _Writer:
+            def write(self, text: str) -> int:
+                with capture._lock:
+                    lines = text.split("\n")
+                    prefixed = "\n".join(("stderr: " + line) if line else "stderr: " for line in lines)
+                    capture._append(capture._target_cell_id(), prefixed)
+                return len(text)
+
+            def flush(self) -> None:
+                return None
+
+        return _Writer()
+
+    def snapshot(self) -> dict[str, list[str]]:
+        with self._lock:
+            if (self._pending_lines or self._pending_partial != "") and self._fallback_cell_ids:
+                fallback = self._fallback_cell_ids[-1]
+                if self._pending_lines:
+                    self._lines.setdefault(fallback, []).extend(self._pending_lines)
+                    self._pending_lines = []
+                if self._pending_partial != "":
+                    self._partials[fallback] = self._partials.get(fallback, "") + self._pending_partial
+                    self._pending_partial = ""
+            snapshot = {cell_id: list(lines) for cell_id, lines in self._lines.items()}
+            for cell_id, partial in self._partials.items():
+                if partial != "":
+                    snapshot.setdefault(cell_id, []).append(partial)
+        return snapshot
+
+
+class _RuntimeLogCapture(logging.Handler):
     def __init__(self) -> None:
+        super().__init__(level=logging.ERROR)
+        self._error_details: dict[str, list[str]] = {}
+        self._lock = threading.Lock()
+
+    def emit(self, record: logging.LogRecord) -> None:
+        message = record.getMessage()
+        if "error_id=" not in message:
+            return
+        lines = message.splitlines()
+        if not lines:
+            return
+        error_id, first_line = self._parse_header(lines[0])
+        if error_id is None:
+            return
+        captured = [line for line in [first_line, *lines[1:]] if line != ""]
+        if not captured:
+            return
+        with self._lock:
+            self._error_details[error_id] = captured
+
+    def snapshot(self) -> dict[str, list[str]]:
+        with self._lock:
+            return {error_id: list(lines) for error_id, lines in self._error_details.items()}
+
+    def _parse_header(self, line: str) -> tuple[str | None, str]:
+        match = re.search(r"error_id=([0-9a-f-]+)\)\s*(.*)$", line)
+        if match is None:
+            return None, line
+        return match.group(1), match.group(2)
+
+
+class Worker:
+    def __init__(self, event_sink: Callable[[dict[str, Any]], None] | None = None) -> None:
         self.sessions: dict[str, Session] = {}
+        self.event_sink = event_sink
         try:
             asyncio.get_event_loop()
         except RuntimeError:
             asyncio.set_event_loop(asyncio.new_event_loop())
-
-    def __del__(self) -> None:
-        try:
-            self.shutdown({})
-        except Exception:
-            pass
 
     def _build_notebook(
         self, path: str, header: str | None, app_options: dict[str, Any], cells: list[dict[str, Any]]
@@ -419,20 +573,131 @@ class Worker:
         file_manager.filename = session.path
         return file_manager
 
-    def _wait_for_completion(self, session: Session, previous_completed_runs: int, timeout: float = 15.0) -> None:
+    def _emit_event(self, event: str, request_id: int | None, payload: dict[str, Any]) -> None:
+        if self.event_sink is None or request_id is None:
+            return
+        self.event_sink(
+            {
+                "event": event,
+                "request_id": request_id,
+                "payload": payload,
+            }
+        )
+
+    def _emit_runtime_update(
+        self,
+        session: Session,
+        request_id: int | None,
+        runtime_cells: dict[str, dict[str, Any]],
+    ) -> None:
+        if not runtime_cells:
+            return
+        self._emit_event(
+            "runtime_update",
+            request_id,
+            {
+                "session_id": session.session_id,
+                "runtime_cells": runtime_cells,
+            },
+        )
+
+    def _changed_runtime_cells(
+        self,
+        previous: dict[str, dict[str, Any]],
+        current: dict[str, dict[str, Any]],
+    ) -> dict[str, dict[str, Any]]:
+        changed: dict[str, dict[str, Any]] = {}
+        for cell_id, runtime in current.items():
+            if previous.get(cell_id) != runtime:
+                changed[cell_id] = runtime
+        return changed
+
+    def _merge_captured_console(
+        self,
+        runtime_cells: dict[str, dict[str, Any]],
+        captured_console: dict[str, list[str]] | None,
+    ) -> dict[str, dict[str, Any]]:
+        if not captured_console:
+            return runtime_cells
+        merged = {cell_id: dict(runtime) for cell_id, runtime in runtime_cells.items()}
+        for cell_id, lines in captured_console.items():
+            if not lines:
+                continue
+            runtime = dict(merged.get(cell_id, _runtime_defaults()))
+            runtime["console_lines"] = _truncate_lines(lines)
+            runtime["has_console"] = bool(runtime["console_lines"])
+            merged[cell_id] = _format_error_runtime(runtime)
+        return merged
+
+    def _merge_runtime_error_details(
+        self,
+        runtime_cells: dict[str, dict[str, Any]],
+        error_details: dict[str, list[str]] | None,
+    ) -> dict[str, dict[str, Any]]:
+        if not error_details:
+            return runtime_cells
+        merged = {cell_id: dict(runtime) for cell_id, runtime in runtime_cells.items()}
+        for cell_id, runtime in merged.items():
+            if runtime.get("output_kind") != "error":
+                continue
+            output_lines = list(cast(list[str], runtime.get("output_lines") or []))
+            error_id = None
+            for line in output_lines:
+                error_id = _internal_error_id(line)
+                if error_id is not None:
+                    break
+            if error_id is None:
+                continue
+            details = error_details.get(error_id) or []
+            if not details:
+                continue
+            runtime["output_lines"] = _truncate_lines(_merge_unique_lines(output_lines, details))
+            merged[cell_id] = _format_error_runtime(runtime)
+        return merged
+
+    def _current_running_cell_id(self, session: Session, preferred_ids: list[str] | None = None) -> str | None:
+        runtime_cells = session.runtime_cells or {}
+        search_ids = preferred_ids or [cell["id"] for cell in session.cells]
+        for cell_id in search_ids:
+            runtime = runtime_cells.get(cell_id) or {}
+            if runtime.get("status") == "running":
+                return cell_id
+        for cell_id in search_ids:
+            runtime = runtime_cells.get(cell_id) or {}
+            if runtime.get("status") == "queued":
+                return cell_id
+        return None
+
+    def _wait_for_completion(
+        self,
+        session: Session,
+        previous_completed_runs: int,
+        timeout: float = 15.0,
+        request_id: int | None = None,
+        console_capture: _ConsoleCapture | None = None,
+        log_capture: _RuntimeLogCapture | None = None,
+    ) -> None:
         if session.runtime_session is None or session.runtime_consumer is None:
             return
         deadline = time.monotonic() + timeout
         settled_since: float | None = None
+        last_emitted = dict(session.runtime_cells or {})
         while time.monotonic() < deadline:
             session.runtime_session.flush_messages()
-            if session.runtime_consumer.completed_runs > previous_completed_runs:
-                time.sleep(0.05)
-                session.runtime_session.flush_messages()
-                return
+            current_runtime = self._refresh_runtime_cells(session)
+            if console_capture is not None:
+                console_capture.bind(self._current_running_cell_id(session))
+                current_runtime = self._merge_captured_console(current_runtime, console_capture.snapshot())
+            if log_capture is not None:
+                current_runtime = self._merge_runtime_error_details(current_runtime, log_capture.snapshot())
+            session.runtime_cells = current_runtime
+            changed = self._changed_runtime_cells(last_emitted, current_runtime)
+            if changed:
+                self._emit_runtime_update(session, request_id, changed)
+                last_emitted = dict(current_runtime)
             view = session.runtime_session.session_view
             notifications = list(view.cell_notifications.values())
-            if notifications and len(notifications) >= len(session.cells):
+            if session.runtime_consumer.completed_runs > previous_completed_runs and notifications:
                 all_settled = True
                 for notification in notifications:
                     if notification.status in {"running", "queued"}:
@@ -466,10 +731,12 @@ class Worker:
                 runtime["stale_inputs"] = bool(notification.stale_inputs)
                 runtime["console_lines"] = _normalize_console(notification.console)
                 runtime["has_console"] = bool(runtime["console_lines"])
+                runtime = _format_error_runtime(runtime)
             execution_time = view.last_execution_time.get(cell_id)
             if isinstance(execution_time, (int, float)) and runtime["status"] == "idle":
                 runtime["last_execution_time_ms"] = int(execution_time)
             runtime_cells[cell_id] = runtime
+        runtime_cells = _format_runtime_cells(runtime_cells)
         session.runtime_cells = runtime_cells
         return runtime_cells
 
@@ -479,8 +746,19 @@ class Worker:
         with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
             return operation()
 
+    @contextlib.contextmanager
+    def _session_cwd(self, session: Session) -> Any:
+        original = os.getcwd()
+        target = str(Path(session.path).resolve().parent)
+        try:
+            os.chdir(target)
+            yield
+        finally:
+            os.chdir(original)
+
     def _with_runtime_payload(self, session: Session) -> dict[str, Any]:
-        runtime_cells = session.runtime_cells or {}
+        runtime_cells = _format_runtime_cells(session.runtime_cells or {})
+        session.runtime_cells = runtime_cells
         cells = [{**cell, "runtime": runtime_cells.get(cell["id"], _runtime_defaults())} for cell in session.cells]
         return {
             "session_id": session.session_id,
@@ -541,14 +819,13 @@ class Worker:
         )
         session.runtime_session = runtime_session
         session.runtime_consumer = consumer
-        previous_completed_runs = consumer.completed_runs
-        self._perform_runtime_operation(
-            lambda: runtime_session.instantiate(
-                InstantiateNotebookRequest(object_ids=[], values=[], auto_run=True),
-                http_request=None,
+        with self._session_cwd(session):
+            self._perform_runtime_operation(
+                lambda: runtime_session.instantiate(
+                    InstantiateNotebookRequest(object_ids=[], values=[], auto_run=False),
+                    http_request=None,
+                )
             )
-        )
-        self._wait_for_completion(session, previous_completed_runs, timeout=30.0)
         self._refresh_runtime_cells(session)
         return self._session_payload(session)
 
@@ -592,33 +869,50 @@ class Worker:
             names=names,
             configs=configs,
         )
-        session.runtime_session.notify(
-            UpdateCellIdsNotification(cell_ids=cell_ids),
-            from_consumer_id=None,
-        )
-        session.runtime_session.notify(
-            UpdateCellCodesNotification(
-                cell_ids=cell_ids,
-                codes=codes,
-                code_is_stale=bool(run_ids),
-                names=names,
-                configs=configs,
-            ),
-            from_consumer_id=None,
-        )
         previous_completed_runs = session.runtime_consumer.completed_runs if session.runtime_consumer else 0
-        self._perform_runtime_operation(
-            lambda: session.runtime_session.put_control_request(
-                SyncGraphCommand(cells=dict(zip(cell_ids, codes)), run_ids=run_ids, delete_ids=delete_ids),
-                from_consumer_id=None,
+        request_id = cast(int | None, params.get("_request_id"))
+        with self._session_cwd(session):
+            self._perform_runtime_operation(
+                lambda: session.runtime_session.put_control_request(
+                    SyncGraphCommand(cells=dict(zip(cell_ids, codes)), run_ids=run_ids, delete_ids=delete_ids),
+                    from_consumer_id=None,
+                )
             )
-        )
-        self._perform_runtime_operation(
-            lambda: self._wait_for_completion(session, previous_completed_runs) if (run_ids or delete_ids) else session.runtime_session.flush_messages()
-        )
+            if run_ids or delete_ids:
+                captured_console = _ConsoleCapture(
+                    current_cell_id=lambda: self._current_running_cell_id(session, run_ids),
+                    fallback_cell_ids=run_ids,
+                )
+                captured_logs = _RuntimeLogCapture()
+                root_logger = logging.getLogger()
+                root_logger.addHandler(captured_logs)
+                try:
+                    with contextlib.redirect_stdout(captured_console.stdout_writer()), contextlib.redirect_stderr(
+                        captured_console.stderr_writer()
+                    ):
+                        self._wait_for_completion(
+                            session,
+                            previous_completed_runs,
+                            request_id=request_id,
+                            console_capture=captured_console,
+                            log_capture=captured_logs,
+                        )
+                finally:
+                    root_logger.removeHandler(captured_logs)
+                session.runtime_cells = self._merge_captured_console(
+                    session.runtime_cells or {}, captured_console.snapshot()
+                )
+                session.runtime_cells = self._merge_runtime_error_details(
+                    session.runtime_cells or {}, captured_logs.snapshot()
+                )
+            else:
+                self._perform_runtime_operation(lambda: session.runtime_session.flush_messages())
         session.last_runtime_sync_hash = sha256_text(json.dumps({"cell_ids": cell_ids, "codes": codes}, sort_keys=True))
         self._refresh_runtime_cells(session)
-        return self._session_payload(session)
+        if run_ids or delete_ids:
+            session.runtime_cells = self._merge_captured_console(session.runtime_cells or {}, captured_console.snapshot())
+            session.runtime_cells = self._merge_runtime_error_details(session.runtime_cells or {}, captured_logs.snapshot())
+        return self._with_runtime_payload(session)
 
     def run_cells(self, params: dict[str, Any]) -> dict[str, Any]:
         session = self.sessions[params["session_id"]]
@@ -630,18 +924,44 @@ class Worker:
             return self._session_payload(session)
         code_by_id = {cell["id"]: cell["code"] for cell in session.cells}
         runnable_ids = [cell_id for cell_id in requested_ids if cell_id in code_by_id]
+        if not session.runtime_bootstrapped:
+            runnable_ids = [cell["id"] for cell in session.cells]
         if not runnable_ids:
             return self._session_payload(session)
         previous_completed_runs = session.runtime_consumer.completed_runs if session.runtime_consumer else 0
-        self._perform_runtime_operation(
-            lambda: session.runtime_session.put_control_request(
-                ExecuteCellsCommand(cell_ids=runnable_ids, codes=[code_by_id[cell_id] for cell_id in runnable_ids]),
-                from_consumer_id=None,
+        request_id = cast(int | None, params.get("_request_id"))
+        with self._session_cwd(session):
+            self._perform_runtime_operation(
+                lambda: session.runtime_session.put_control_request(
+                    ExecuteCellsCommand(cell_ids=list(runnable_ids), codes=[code_by_id[cell_id] for cell_id in runnable_ids]),
+                    from_consumer_id=None,
+                )
             )
-        )
-        self._perform_runtime_operation(lambda: self._wait_for_completion(session, previous_completed_runs))
+            captured_console = _ConsoleCapture(
+                current_cell_id=lambda: self._current_running_cell_id(session, runnable_ids),
+                fallback_cell_ids=runnable_ids,
+            )
+            captured_logs = _RuntimeLogCapture()
+            root_logger = logging.getLogger()
+            root_logger.addHandler(captured_logs)
+            try:
+                with contextlib.redirect_stdout(captured_console.stdout_writer()), contextlib.redirect_stderr(
+                    captured_console.stderr_writer()
+                ):
+                    self._wait_for_completion(
+                        session,
+                        previous_completed_runs,
+                        request_id=request_id,
+                        console_capture=captured_console,
+                        log_capture=captured_logs,
+                    )
+            finally:
+                root_logger.removeHandler(captured_logs)
+        session.runtime_bootstrapped = True
         self._refresh_runtime_cells(session)
-        return self._session_payload(session)
+        session.runtime_cells = self._merge_captured_console(session.runtime_cells or {}, captured_console.snapshot())
+        session.runtime_cells = self._merge_runtime_error_details(session.runtime_cells or {}, captured_logs.snapshot())
+        return self._with_runtime_payload(session)
 
     def get_runtime_state(self, params: dict[str, Any]) -> dict[str, Any]:
         session = self.sessions[params["session_id"]]
@@ -655,6 +975,8 @@ class Worker:
         lines = params["content"].splitlines()
         cells = self._from_projection(lines, session.cells)
         changed_ids, deleted_ids = self._compute_changed_and_deleted_ids(previous_cells, cells)
+        if not session.runtime_bootstrapped:
+            changed_ids = [cell["id"] for cell in cells]
         canonical_source, projection_map, cells = self._build_notebook(session.path, session.header, session.app_options, cells)
         projected_lines = render_projected_lines(cells)[0]
         session.cells = cells
@@ -669,8 +991,11 @@ class Worker:
                 "session_id": session.session_id,
                 "run_ids": changed_ids,
                 "delete_ids": deleted_ids,
+                "_request_id": params.get("_request_id"),
             }
         )
+        if changed_ids or session.runtime_session is not None:
+            session.runtime_bootstrapped = True
         return self._session_payload(session)
 
     def open_session(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -711,6 +1036,7 @@ class Worker:
             last_saved_source_hash=sha256_text(canonical_source),
             last_projection_hash=sha256_text("\n".join(projected_lines)),
             runtime_cells={},
+            runtime_bootstrapped=False,
             pending_changed_cell_ids=[],
         )
         self.sessions[session_id] = session
@@ -742,6 +1068,19 @@ class Worker:
         result["last_saved_source_hash"] = session.last_saved_source_hash
         return result
 
+    def write_projection(self, params: dict[str, Any]) -> dict[str, Any]:
+        path = params["path"]
+        lines = params["content"].splitlines()
+        header = params.get("header")
+        app_options = dict(params.get("app_options") or {})
+        cells = self._from_projection(lines, None)
+        canonical_source, _, _ = self._build_notebook(path, header, app_options, cells)
+        Path(path).write_text(canonical_source, encoding="utf-8")
+        return {
+            "canonical_source": canonical_source,
+            "last_saved_source_hash": sha256_text(canonical_source),
+        }
+
     def reload_from_disk(self, params: dict[str, Any]) -> dict[str, Any]:
         session = self.sessions[params["session_id"]]
         content = Path(session.path).read_text(encoding="utf-8")
@@ -762,6 +1101,7 @@ class Worker:
         session.runtime_session = None
         session.runtime_consumer = None
         session.runtime_cells = {}
+        session.runtime_bootstrapped = False
         return self.ensure_runtime_session({"session_id": session.session_id})
 
     def interrupt(self, params: dict[str, Any]) -> dict[str, Any]:

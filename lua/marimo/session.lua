@@ -13,7 +13,6 @@ function M.set_session(bufnr, payload)
 	vim.b[bufnr].marimo_projection_map = payload.projection_map or {}
 	vim.b[bufnr].marimo_canonical_source = payload.canonical_source or ""
 	vim.b[bufnr].marimo_last_saved_source_hash = payload.last_saved_source_hash
-	vim.b[bufnr].marimo_last_runtime_request_id = vim.b[bufnr].marimo_last_runtime_request_id or 0
 end
 
 function M.clear_session(bufnr)
@@ -26,15 +25,9 @@ function M.clear_session(bufnr)
 	vim.b[bufnr].marimo_cells = nil
 	vim.b[bufnr].marimo_runtime_cells = nil
 	vim.b[bufnr].marimo_runtime_enabled = nil
-	vim.b[bufnr].marimo_last_runtime_request_id = nil
 	vim.b[bufnr].marimo_projection_map = nil
 	vim.b[bufnr].marimo_canonical_source = nil
 	vim.b[bufnr].marimo_last_saved_source_hash = nil
-	if vim.b[bufnr].marimo_autorun_timer then
-		vim.b[bufnr].marimo_autorun_timer:stop()
-		vim.b[bufnr].marimo_autorun_timer:close()
-		vim.b[bufnr].marimo_autorun_timer = nil
-	end
 end
 
 return M

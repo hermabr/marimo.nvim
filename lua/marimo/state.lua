@@ -22,15 +22,9 @@ function M.clear_projected_state(bufnr)
 	vim.b[bufnr].marimo_cells = nil
 	vim.b[bufnr].marimo_runtime_cells = nil
 	vim.b[bufnr].marimo_runtime_enabled = nil
-	vim.b[bufnr].marimo_last_runtime_request_id = nil
 	vim.b[bufnr].marimo_projection_map = nil
 	vim.b[bufnr].marimo_canonical_source = nil
 	vim.b[bufnr].marimo_last_saved_source_hash = nil
-	if vim.b[bufnr].marimo_autorun_timer then
-		vim.b[bufnr].marimo_autorun_timer:stop()
-		vim.b[bufnr].marimo_autorun_timer:close()
-		vim.b[bufnr].marimo_autorun_timer = nil
-	end
 end
 
 function M.mark_projected(bufnr, ensure_projected_buffer_setup)

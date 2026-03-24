@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import cast
 
 from marimo_nvim_py.projected import dedupe_empty_cells, drop_empty_cells, parse_projected_cells, promote_first_marker_to_marimo
 from marimo_nvim_py.sessions import Worker
@@ -155,6 +156,23 @@ def test_write_session_writes_canonical_marimo_source(tmp_path: Path) -> None:
     assert "@app.cell" in written
 
 
+def test_write_projection_writes_canonical_marimo_source(tmp_path: Path) -> None:
+    worker = Worker()
+    path = tmp_path / "projected_async.py"
+    result = worker.write_projection(
+        {
+            "path": str(path),
+            "content": "# + {marimo}\n\nx = 1\nx",
+            "header": None,
+            "app_options": {},
+        }
+    )
+    written = path.read_text(encoding="utf-8")
+    assert "import marimo" in written
+    assert "@app.cell" in written
+    assert result["last_saved_source_hash"]
+
+
 def test_open_session_from_raw_notebook_drops_empty_cells(tmp_path: Path) -> None:
     worker = Worker()
     path = tmp_path / "raw_with_empty.py"
@@ -222,10 +240,10 @@ def test_sync_projection_preserves_existing_ids_when_inserting_first_cell(tmp_pa
     assert updated["cells"][2]["editor_status"] == "clean"
 
 
-def test_open_session_populates_runtime_output(tmp_path: Path) -> None:
+def test_run_cells_populates_runtime_output(tmp_path: Path) -> None:
     worker = Worker()
     path = tmp_path / "runtime_output.py"
-    result = worker.open_session(
+    initial = worker.open_session(
         {
             "path": str(path),
             "content": "# + {marimo}\n\nx = 1\nx",
@@ -234,6 +252,7 @@ def test_open_session_populates_runtime_output(tmp_path: Path) -> None:
             "runtime_kind": "uv_project",
         }
     )
+    result = worker.run_cells({"session_id": initial["session_id"], "cell_ids": [initial["cells"][0]["id"]]})
     runtime = result["cells"][0]["runtime"]
     assert runtime["status"] == "idle"
     assert runtime["output_kind"] == "text"
@@ -267,7 +286,7 @@ def test_sync_and_run_updates_descendant_outputs(tmp_path: Path) -> None:
 def test_html_output_is_summarized(tmp_path: Path) -> None:
     worker = Worker()
     path = tmp_path / "html_output.py"
-    result = worker.open_session(
+    initial = worker.open_session(
         {
             "path": str(path),
             "content": '# + {marimo}\n\nimport marimo as mo\nmo.md(\"# hello\")',
@@ -276,7 +295,190 @@ def test_html_output_is_summarized(tmp_path: Path) -> None:
             "runtime_kind": "uv_project",
         }
     )
+    result = worker.run_cells({"session_id": initial["session_id"], "cell_ids": [initial["cells"][0]["id"]]})
     runtime = result["cells"][0]["runtime"]
     assert runtime["output_kind"] in {"text", "html", "widget"}
     assert runtime["output_summary"] is not None or runtime["output_lines"]
+    worker.shutdown({})
+
+
+def test_run_cells_captures_stdout_as_console_lines(tmp_path: Path) -> None:
+    worker = Worker()
+    path = tmp_path / "stdout_output.py"
+    initial = worker.open_session(
+        {
+            "path": str(path),
+            "content": '# + {marimo}\n\nprint("hello")\n1',
+            "input_kind": "projected",
+            "project_root": str(tmp_path),
+            "runtime_kind": "uv_project",
+        }
+    )
+    result = worker.run_cells({"session_id": initial["session_id"], "cell_ids": [initial["cells"][0]["id"]]})
+    runtime = result["cells"][0]["runtime"]
+    assert runtime["output_lines"] == ["1"]
+    assert runtime["console_lines"] == ["hello"]
+    assert runtime["has_console"] is True
+    worker.shutdown({})
+
+
+def test_run_cells_emits_incremental_runtime_updates(tmp_path: Path) -> None:
+    events: list[dict[str, object]] = []
+    worker = Worker(event_sink=events.append)
+    path = tmp_path / "runtime_stream.py"
+    initial = worker.open_session(
+        {
+            "path": str(path),
+            "content": "# + {marimo}\n\nx = 1\nx\n\n# +\n\nimport time\ntime.sleep(2.0)\ny = x + 1\ny",
+            "input_kind": "projected",
+            "project_root": str(tmp_path),
+            "runtime_kind": "uv_project",
+        }
+    )
+
+    result = worker.run_cells(
+        {
+            "session_id": initial["session_id"],
+            "cell_ids": [cell["id"] for cell in initial["cells"]],
+            "_request_id": 42,
+        }
+    )
+
+    assert result["cells"][0]["runtime"]["output_lines"] == ["1"]
+    assert result["cells"][1]["runtime"]["output_lines"] == ["2"]
+    first_cell_id = initial["cells"][0]["id"]
+    second_cell_id = initial["cells"][1]["id"]
+    runtime_events = [event for event in events if event.get("event") == "runtime_update"]
+    assert runtime_events
+    assert any(
+        event.get("request_id") == 42
+        and isinstance(event.get("payload"), dict)
+        and cast(dict[str, dict[str, object]], cast(dict[str, object], event["payload"])["runtime_cells"]).get(first_cell_id, {}).get("output_lines")
+        == ["1"]
+        and cast(dict[str, dict[str, object]], cast(dict[str, object], event["payload"])["runtime_cells"]).get(second_cell_id, {}).get("status")
+        in {"queued", "running"}
+        for event in runtime_events
+    )
+    worker.shutdown({})
+
+
+def test_run_cells_resolves_relative_paths_from_notebook_directory(tmp_path: Path) -> None:
+    worker = Worker()
+    path = tmp_path / "relative_path.py"
+    data_path = tmp_path / "value.txt"
+    data_path.write_text("hello", encoding="utf-8")
+    initial = worker.open_session(
+        {
+            "path": str(path),
+            "content": '# + {marimo}\n\nfrom pathlib import Path\nPath("./value.txt").read_text()',
+            "input_kind": "projected",
+            "project_root": str(tmp_path),
+            "runtime_kind": "uv_project",
+        }
+    )
+    result = worker.run_cells({"session_id": initial["session_id"], "cell_ids": [initial["cells"][0]["id"]]})
+    assert result["cells"][0]["runtime"]["output_lines"] == ["'hello'"]
+    worker.shutdown({})
+
+
+def test_run_cells_attributes_stdout_to_the_emitting_cell(tmp_path: Path) -> None:
+    worker = Worker()
+    path = tmp_path / "stdout_attribution.py"
+    (tmp_path / "value.txt").write_text("hello", encoding="utf-8")
+    initial = worker.open_session(
+        {
+            "path": str(path),
+            "content": (
+                '# + {marimo}\n\nfrom pathlib import Path\nPath("./value.txt").read_text()\n\n'
+                '# +\n\nprint("HEY")'
+            ),
+            "input_kind": "projected",
+            "project_root": str(tmp_path),
+            "runtime_kind": "uv_project",
+        }
+    )
+    result = worker.run_cells({"session_id": initial["session_id"], "cell_ids": [cell["id"] for cell in initial["cells"]]})
+    first_runtime = result["cells"][0]["runtime"]
+    second_runtime = result["cells"][1]["runtime"]
+    assert first_runtime["output_lines"] == ["'hello'"]
+    assert first_runtime["console_lines"] == []
+    assert second_runtime["console_lines"] == ["HEY"]
+    worker.shutdown({})
+
+
+def test_run_cells_formats_runtime_tracebacks_as_error_output(tmp_path: Path) -> None:
+    worker = Worker()
+    path = tmp_path / "runtime_nameerror.py"
+    initial = worker.open_session(
+        {
+            "path": str(path),
+            "content": "# + {marimo}\n\ndf",
+            "input_kind": "projected",
+            "project_root": str(tmp_path),
+            "runtime_kind": "uv_project",
+        }
+    )
+    result = worker.run_cells({"session_id": initial["session_id"], "cell_ids": [initial["cells"][0]["id"]]})
+    runtime = result["cells"][0]["runtime"]
+    assert runtime["output_kind"] == "error"
+    assert runtime["console_lines"] == []
+    assert not any("An internal error occurred:" in line for line in runtime["output_lines"])
+    assert any("Traceback (most recent call last):" in line for line in runtime["output_lines"])
+    assert any("NameError: name 'df' is not defined" in line for line in runtime["output_lines"])
+    worker.shutdown({})
+
+
+def test_sync_and_run_only_reruns_changed_branch(tmp_path: Path) -> None:
+    worker = Worker()
+    path = tmp_path / "branch_selective.py"
+    initial = worker.open_session(
+        {
+            "path": str(path),
+            "content": (
+                "# + {marimo, setup=True}\n\ncounts = {'a': 0, 'left': 0, 'b': 0, 'final': 0}\n\n"
+                "# +\n\ncounts['a'] += 1\na = 2\ncounts['a']\n\n"
+                "# +\n\ncounts['left'] += 1\ncounts['left']\n\n"
+                "# +\n\ncounts['b'] += 1\nb = 2\ncounts['b']\n\n"
+                "# +\n\ncounts['final'] += 1\ncounts['final'] * 100 + a * b\n"
+            ),
+            "input_kind": "projected",
+            "project_root": str(tmp_path),
+            "runtime_kind": "uv_project",
+        }
+    )
+
+    bootstrapped = worker.sync_and_run(
+        {
+            "session_id": initial["session_id"],
+            "content": (
+                "# + {marimo, setup=True}\n\ncounts = {'a': 0, 'left': 0, 'b': 0, 'final': 0}\n\n"
+                "# +\n\ncounts['a'] += 1\na = 2\ncounts['a']\n\n"
+                "# +\n\ncounts['left'] += 1\ncounts['left']\n\n"
+                "# +\n\ncounts['b'] += 1\nb = 2\ncounts['b']\n\n"
+                "# +\n\ncounts['final'] += 1\ncounts['final'] * 100 + a * b\n"
+            ),
+        }
+    )
+    assert bootstrapped["cells"][1]["runtime"]["output_lines"] == ["1"]
+    assert bootstrapped["cells"][2]["runtime"]["output_lines"] == ["1"]
+    assert bootstrapped["cells"][3]["runtime"]["output_lines"] == ["1"]
+    assert bootstrapped["cells"][4]["runtime"]["output_lines"] == ["104"]
+
+    updated = worker.sync_and_run(
+        {
+            "session_id": initial["session_id"],
+            "content": (
+                "# + {marimo, setup=True}\n\ncounts = {'a': 0, 'left': 0, 'b': 0, 'final': 0}\n\n"
+                "# +\n\ncounts['a'] += 1\na = 2\ncounts['a']\n\n"
+                "# +\n\ncounts['left'] += 1\ncounts['left']\n\n"
+                "# +\n\ncounts['b'] += 1\nb = 3\ncounts['b']\n\n"
+                "# +\n\ncounts['final'] += 1\ncounts['final'] * 100 + a * b\n"
+            ),
+        }
+    )
+
+    assert updated["cells"][1]["runtime"]["output_lines"] == ["1"]
+    assert updated["cells"][2]["runtime"]["output_lines"] == ["1"]
+    assert updated["cells"][3]["runtime"]["output_lines"] == ["2"]
+    assert updated["cells"][4]["runtime"]["output_lines"] == ["206"]
     worker.shutdown({})

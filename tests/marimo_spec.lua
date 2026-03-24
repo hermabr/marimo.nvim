@@ -35,6 +35,11 @@ local function edit(path)
 	vim.cmd("edit " .. vim.fn.fnameescape(path))
 end
 
+local function wait_for_truthy(fn, message, timeout)
+	local matched = vim.wait(timeout or 5000, fn, 20)
+	assert_truthy(matched, message or "timed out waiting for condition")
+end
+
 local function make_path(name)
 	return temp_root .. "/" .. name
 end
@@ -125,6 +130,10 @@ local function test_activate_projected_notebook_and_write_raw_marimo_file()
 	vim.cmd("Marimo on")
 	assert_eq(vim.api.nvim_buf_get_lines(0, 0, 1, false)[1], "# + {marimo}")
 	vim.cmd("write")
+	wait_for_truthy(function()
+		local content = read_file(path)
+		return content:match("import marimo") ~= nil and content:match("@app%.cell") ~= nil and content:match("app%.run%(%)") ~= nil
+	end, "timed out waiting for projected notebook write")
 
 	local content = read_file(path)
 	assert_matches(content, "import marimo")
@@ -197,8 +206,8 @@ local function test_deactivation_clears_render_extmarks()
 	edit(path)
 
 	vim.cmd("Marimo")
+	vim.cmd("MarimoRunAll")
 	assert_truthy(vim.b.marimo_projected)
-	assert_truthy(#vim.api.nvim_buf_get_extmarks(0, -1, 0, -1, {}) > 0)
 
 	vim.cmd("Marimo")
 	assert_truthy(not vim.b.marimo_projected)
@@ -222,6 +231,9 @@ local function test_failed_deactivation_keeps_worker_session_alive()
 	assert_eq(vim.b.marimo_session_id, session_id)
 
 	vim.cmd("write")
+	wait_for_truthy(function()
+		return read_file(path):match("extra = 1") ~= nil
+	end, "timed out waiting for dirty projected notebook write")
 	local content = read_file(path)
 	assert_matches(content, "extra = 1")
 end
@@ -361,16 +373,68 @@ local function rendered_lines()
 	return lines
 end
 
+local function wait_for_match(pattern, timeout)
+	local matched = vim.wait(timeout or 5000, function()
+		return table.concat(rendered_lines(), "\n"):match(pattern) ~= nil
+	end, 20)
+	assert_truthy(matched, "timed out waiting for pattern: " .. pattern)
+end
+
 local function test_runtime_outputs_render_below_cells()
 	local path = make_path("runtime_outputs.py")
 	write_file(path, "# + {marimo}\n\nx = 1\nx\n\n# +\n\ny = x + 1\ny")
 	edit(path)
 
 	vim.cmd("Marimo on")
+	vim.cmd("MarimoRunAll")
+	wait_for_match(" 1")
+	wait_for_match(" 2")
 	local lines = table.concat(rendered_lines(), "\n")
-	assert_matches(lines, "marimo idle")
 	assert_matches(lines, " 1")
 	assert_matches(lines, " 2")
+	assert_truthy(not lines:match("marimo idle"))
+end
+
+local function test_write_does_not_block_while_runtime_is_running()
+	local path = make_path("nonblocking_write.py")
+	write_file(path, "# + {marimo}\n\nimport time\n\n# +\n\ntime.sleep(2)\nx = 1\nx")
+	edit(path)
+
+	vim.cmd("Marimo on")
+	vim.cmd("MarimoRunAll")
+	local started = vim.uv.hrtime()
+	vim.cmd("write")
+	local elapsed_ms = (vim.uv.hrtime() - started) / 1000000
+	assert_truthy(elapsed_ms < 1000, "expected write to return without waiting for the running cell")
+	wait_for_truthy(function()
+		local content = read_file(path)
+		return content:match("import marimo") ~= nil and content:match("@app%.cell") ~= nil
+	end, "timed out waiting for async write")
+end
+
+local function test_run_all_shows_per_cell_running_placeholders()
+	local path = make_path("runtime_pending.py")
+	write_file(path, "# + {marimo}\n\nx = 1\nx\n\n# +\n\nimport time\ntime.sleep(2.0)\ny = x + 1\ny")
+	edit(path)
+
+	vim.cmd("Marimo on")
+	vim.cmd("MarimoRunAll")
+	wait_for_match(" 1", 1000)
+	local early_lines = table.concat(rendered_lines(), "\n")
+	assert_truthy(early_lines:match("marimo queued") or early_lines:match("marimo running"))
+	if early_lines:match(" 2") then
+		error("expected second cell output to remain pending while its placeholder is visible")
+	end
+	wait_for_match(" 2", 5000)
+end
+
+local function test_opening_without_running_does_not_render_idle_placeholders()
+	local path = make_path("runtime_idle_hidden.py")
+	write_file(path, "# + {marimo}\n\nx = 1\nx")
+	edit(path)
+
+	vim.cmd("Marimo on")
+	assert_eq(#rendered_lines(), 0)
 end
 
 local function test_sync_buffer_updates_reactive_outputs()
@@ -387,6 +451,37 @@ local function test_sync_buffer_updates_reactive_outputs()
 	assert_matches(lines, " 4")
 end
 
+local function test_runtime_outputs_include_stdout()
+	local path = make_path("runtime_stdout.py")
+	write_file(path, '# + {marimo}\n\nprint("hello")\n1')
+	edit(path)
+
+	vim.cmd("Marimo on")
+	vim.cmd("MarimoRunAll")
+	wait_for_match(" 1")
+	wait_for_match(" hello")
+	local lines = table.concat(rendered_lines(), "\n")
+	assert_matches(lines, " 1")
+	assert_matches(lines, " hello")
+	assert_truthy(not lines:match("marimo idle"))
+end
+
+local function test_runtime_errors_include_descriptive_stderr_context()
+	local path = make_path("runtime_error_details.py")
+	write_file(path, "# + {marimo}\n\nimport numpy as np\n= np.array(object=[1, 2, 3])\nx")
+	edit(path)
+
+	vim.cmd("Marimo on")
+	vim.cmd("MarimoRunAll")
+	wait_for_match("marimo error")
+	wait_for_match("SyntaxError: invalid syntax")
+
+	local lines = table.concat(rendered_lines(), "\n")
+	assert_truthy(not lines:match("An internal error occurred:"), "expected internal marimo error id to stay hidden")
+	assert_matches(lines, "SyntaxError: invalid syntax")
+	assert_matches(lines, "line 2")
+end
+
 local function test_run_current_cell_command_refreshes_output()
 	local path = make_path("runtime_run_current.py")
 	write_file(path, "# + {marimo}\n\nx = 1\nx")
@@ -396,6 +491,7 @@ local function test_run_current_cell_command_refreshes_output()
 	vim.api.nvim_buf_set_lines(0, 2, 3, false, { "x = 7" })
 	vim.api.nvim_win_set_cursor(0, { 3, 0 })
 	vim.cmd("MarimoRunCell")
+	wait_for_match(" 7")
 
 	local lines = table.concat(rendered_lines(), "\n")
 	assert_matches(lines, " 7")
@@ -420,7 +516,12 @@ local tests = {
 	test_navigation_keymap_callbacks_work,
 	test_jump_next_cell_appends_new_cell_and_enters_insert_mode,
 	test_runtime_outputs_render_below_cells,
+	test_write_does_not_block_while_runtime_is_running,
+	test_run_all_shows_per_cell_running_placeholders,
+	test_opening_without_running_does_not_render_idle_placeholders,
 	test_sync_buffer_updates_reactive_outputs,
+	test_runtime_outputs_include_stdout,
+	test_runtime_errors_include_descriptive_stderr_context,
 	test_run_current_cell_command_refreshes_output,
 }
 
