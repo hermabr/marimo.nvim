@@ -423,6 +423,141 @@ local function test_navigation_keymap_callbacks_work()
 	assert_eq(vim.api.nvim_win_get_cursor(0)[1], 7)
 end
 
+local rendered_lines
+local wait_for_match
+
+local function find_floating_window()
+	for _, winid in ipairs(vim.api.nvim_list_wins()) do
+		local config = vim.api.nvim_win_get_config(winid)
+		if config.relative and config.relative ~= "" then
+			return winid
+		end
+	end
+	return nil
+end
+
+local function test_output_keymap_opens_scrollable_float()
+	local path = make_path("output_keymap.py")
+	write_file(path, '# + {marimo}\n\nprint("\\n".join(str(i) for i in range(80)))')
+	edit(path)
+
+	vim.cmd("Marimo on")
+	vim.cmd("MarimoRunAll")
+	wait_for_match(" 0")
+	wait_for_match("%[output truncated%]")
+	vim.api.nvim_win_set_cursor(0, { 3, 0 })
+
+	local output_map = vim.fn.maparg("<leader>mo", "n", false, true)
+	assert_truthy(type(output_map.callback) == "function", "expected <leader>mo callback")
+	output_map.callback()
+
+	local winid = find_floating_window()
+	assert_truthy(winid ~= nil, "expected output to open in a floating window")
+	local config = vim.api.nvim_win_get_config(winid)
+	assert_truthy(config.relative ~= "", "expected output to open in a floating window")
+
+	local float_bufnr = vim.api.nvim_win_get_buf(winid)
+	local lines = vim.api.nvim_buf_get_lines(float_bufnr, 0, -1, false)
+	assert_truthy(#lines > vim.api.nvim_win_get_height(winid), "expected float output to be scrollable")
+	assert_eq(lines[1], "0")
+	assert_eq(lines[#lines], "79")
+	assert_truthy(not table.concat(lines, "\n"):match("%[output truncated%]"), "expected full output in float")
+
+	vim.api.nvim_set_current_win(winid)
+	vim.cmd("normal! G")
+	assert_eq(vim.api.nvim_win_get_cursor(winid)[1], #lines)
+	vim.cmd("normal! gg")
+	assert_eq(vim.api.nvim_win_get_cursor(winid)[1], 1)
+end
+
+local function test_marimo_output_command_opens_current_cell_output()
+	local path = make_path("output_command.py")
+	write_file(path, '# + {marimo}\n\nprint("hello")\n\n# +\n\nprint("goodbye")')
+	edit(path)
+
+	vim.cmd("Marimo on")
+	vim.cmd("MarimoRunAll")
+	wait_for_match(" hello")
+	wait_for_match(" goodbye")
+
+	vim.api.nvim_win_set_cursor(0, { 3, 0 })
+	vim.cmd("MarimoOutput")
+	local first_win = find_floating_window()
+	assert_truthy(first_win ~= nil, "expected first output float")
+	local first_lines = vim.api.nvim_buf_get_lines(vim.api.nvim_win_get_buf(first_win), 0, -1, false)
+	assert_eq(first_lines[1], "hello")
+	vim.api.nvim_win_close(first_win, true)
+
+	vim.api.nvim_win_set_cursor(0, { 7, 0 })
+	vim.cmd("MarimoOutput")
+	local second_win = find_floating_window()
+	assert_truthy(second_win ~= nil, "expected second output float")
+	local second_lines = vim.api.nvim_buf_get_lines(vim.api.nvim_win_get_buf(second_win), 0, -1, false)
+	assert_eq(second_lines[1], "goodbye")
+	vim.api.nvim_win_close(second_win, true)
+end
+
+local function test_marimo_output_preserves_relative_numbers_and_wraps_lines()
+	local path = make_path("output_window_options.py")
+	write_file(path, '# + {marimo}\n\nprint("' .. string.rep("wrap-me-", 40) .. '")')
+	edit(path)
+
+	vim.wo.number = true
+	vim.wo.relativenumber = true
+
+	vim.cmd("Marimo on")
+	vim.cmd("MarimoRunAll")
+	wait_for_match(" wrap%-me%-")
+	vim.api.nvim_win_set_cursor(0, { 3, 0 })
+	vim.cmd("MarimoOutput")
+
+	local float_win = find_floating_window()
+	assert_truthy(float_win ~= nil, "expected output float for window option test")
+	assert_truthy(vim.wo[float_win].wrap, "expected output float to wrap long lines")
+	assert_truthy(vim.wo[float_win].number, "expected output float to keep line numbers")
+	assert_truthy(vim.wo[float_win].relativenumber, "expected output float to keep relative line numbers")
+
+	vim.api.nvim_win_close(float_win, true)
+end
+
+local function test_marimo_output_renders_images_in_float()
+	local path = make_path("output_float_image.py")
+	reset_snacks_image_calls()
+	write_file(
+		path,
+		'# + {marimo}\n\nimport marimo as mo\nmo.image(src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wn9lD8AAAAASUVORK5CYII=")'
+	)
+	edit(path)
+
+	vim.cmd("Marimo on")
+	vim.cmd("MarimoRunAll")
+	wait_for_truthy(function()
+		return #snacks_image_calls.new > 0
+	end, "timed out waiting for inline image placement")
+
+	local initial_calls = #snacks_image_calls.new
+	vim.api.nvim_win_set_cursor(0, { 3, 0 })
+	vim.cmd("MarimoOutput")
+	wait_for_truthy(function()
+		return #snacks_image_calls.new > initial_calls
+	end, "timed out waiting for float image placement")
+
+	local float_win = find_floating_window()
+	assert_truthy(float_win ~= nil, "expected image output float")
+	local float_bufnr = vim.api.nvim_win_get_buf(float_win)
+	local call = snacks_image_calls.new[#snacks_image_calls.new]
+	assert_eq(call.bufnr, float_bufnr)
+	assert_truthy(call.opts.inline)
+	assert_truthy(call.opts.pos[1] >= 1, "expected float image line anchor")
+
+	local lines = vim.api.nvim_buf_get_lines(float_bufnr, 0, -1, false)
+	assert_truthy(not table.concat(lines, "\n"):match("%[image/png output%]"), "expected image placeholder to be replaced in float")
+
+	local closed_before = snacks_image_calls.closed
+	vim.cmd("q")
+	assert_truthy(snacks_image_calls.closed > closed_before, "expected float image placement to close")
+end
+
 local function test_jump_next_cell_appends_new_cell_and_enters_insert_mode()
 	local path = make_path("navigation_append.py")
 	write_file(path, "# + {marimo}\n\nx = 1\n")
@@ -458,7 +593,7 @@ local function test_jump_next_cell_appends_new_cell_and_enters_insert_mode()
 	assert_truthy(startinsert_called, "expected ]m at the last cell to request insert mode")
 end
 
-local function rendered_lines()
+rendered_lines = function()
 	local marks = vim.api.nvim_buf_get_extmarks(0, -1, 0, -1, { details = true })
 	local lines = {}
 	for _, mark in ipairs(marks) do
@@ -474,7 +609,7 @@ local function rendered_lines()
 	return lines
 end
 
-local function wait_for_match(pattern, timeout)
+wait_for_match = function(pattern, timeout)
 	local matched = vim.wait(timeout or 5000, function()
 		return table.concat(rendered_lines(), "\n"):match(pattern) ~= nil
 	end, 20)
@@ -757,6 +892,10 @@ local tests = {
 	test_normalize_projected_buffer_lines_deletes_empty_cells,
 	test_navigation_commands_jump_between_cells,
 	test_navigation_keymap_callbacks_work,
+	test_output_keymap_opens_scrollable_float,
+	test_marimo_output_command_opens_current_cell_output,
+	test_marimo_output_preserves_relative_numbers_and_wraps_lines,
+	test_marimo_output_renders_images_in_float,
 	test_jump_next_cell_appends_new_cell_and_enters_insert_mode,
 	test_runtime_outputs_render_below_cells,
 	test_runtime_image_outputs_use_snacks_image,

@@ -52,6 +52,7 @@ You can also use:
 
 - `:MarimoCellPrev`
 - `:MarimoCellNext`
+- `:MarimoOutput`
 - `:MarimoNormalize`
 
 The default keymaps can be changed or disabled in `setup`:
@@ -61,9 +62,12 @@ require("marimo").setup({
   keymaps = {
     prev_cell = "[m",
     next_cell = "]m",
+    show_output = "<leader>mo",
   },
 })
 ```
+
+`<leader>mo` opens the current cell's output in a larger floating window you can scroll with normal motions. If `snacks.image` is available, image outputs render there too.
 
 ## Test
 
