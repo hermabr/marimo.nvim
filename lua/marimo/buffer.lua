@@ -6,6 +6,7 @@ local state = dofile(dir .. "/state.lua")
 local worker = dofile(dir .. "/worker.lua")
 local session = dofile(dir .. "/session.lua")
 local render = dofile(dir .. "/render.lua")
+local output_window = dofile(dir .. "/output_window.lua")
 local lsp_bridge = dofile(dir .. "/lsp_bridge.lua")
 local navigation = dofile(dir .. "/navigation.lua")
 
@@ -61,6 +62,7 @@ local function apply_runtime_payload(bufnr, payload)
 		vim.b[bufnr].marimo_runtime_cells[cell.id] = cell.runtime or {}
 	end
 	render.render(bufnr, payload.cells)
+	output_window.refresh(bufnr)
 end
 
 local function merge_runtime_cells(bufnr, runtime_cells)
@@ -76,6 +78,7 @@ local function merge_runtime_cells(bufnr, runtime_cells)
 		end
 	end
 	render.render(bufnr, cells)
+	output_window.refresh(bufnr)
 end
 
 local function mark_cells_pending(bufnr, cell_ids)
@@ -226,6 +229,7 @@ function M.reload_raw_buffer(bufnr)
 	vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, raw_lines)
 	stop_autorun_timer(bufnr)
 	runtime_state[bufnr] = nil
+	output_window.close(bufnr)
 	render.clear(bufnr)
 	state.clear_projected_state(bufnr)
 	vim.bo[bufnr].modified = false
@@ -426,6 +430,11 @@ function M.interrupt(bufnr)
 	end)
 end
 
+function M.open_current_output(bufnr)
+	bufnr = bufnr or vim.api.nvim_get_current_buf()
+	return output_window.open_current(bufnr)
+end
+
 function M.activate(bufnr, opts)
 	opts = opts or {}
 	bufnr = bufnr or vim.api.nvim_get_current_buf()
@@ -534,6 +543,7 @@ function M.cleanup_buffer(bufnr)
 	if session_id and filepath ~= "" then
 		close_session_async(filepath, session_id)
 	end
+	output_window.close(bufnr)
 	if vim.api.nvim_buf_is_valid(bufnr) then
 		render.clear(bufnr)
 		session.clear_session(bufnr)

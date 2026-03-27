@@ -15,6 +15,7 @@ local setup_opts = {
 	keymaps = {
 		prev_cell = "[m",
 		next_cell = "]m",
+		show_output = "<leader>mo",
 	},
 }
 
@@ -80,6 +81,11 @@ local function ensure_navigation_keymaps(bufnr)
 			M.jump_next_cell(bufnr)
 		end, { buffer = bufnr, silent = true, desc = "Marimo: next cell" })
 	end
+	if keymaps.show_output then
+		vim.keymap.set("n", keymaps.show_output, function()
+			M.open_current_output(bufnr)
+		end, { buffer = bufnr, silent = true, desc = "Marimo: show cell output" })
+	end
 
 	vim.b[bufnr].marimo_navigation_keymaps = true
 end
@@ -101,6 +107,7 @@ M.write_buffer = buffer.write_buffer
 M.sync_buffer = buffer.sync_buffer
 M.run_current_cell = buffer.run_current_cell
 M.run_all_cells = buffer.run_all_cells
+M.open_current_output = buffer.open_current_output
 M.interrupt = buffer.interrupt
 
 M.mark_projected = function(bufnr)

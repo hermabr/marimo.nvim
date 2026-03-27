@@ -76,6 +76,10 @@ function M.setup(opts)
 		api.run_all_cells(0)
 	end, {})
 
+	vim.api.nvim_create_user_command("MarimoOutput", function()
+		api.open_current_output(0)
+	end, {})
+
 	vim.api.nvim_create_user_command("MarimoInterrupt", function()
 		api.interrupt(0)
 	end, {})
