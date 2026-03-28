@@ -88,7 +88,7 @@ function M.render(bufnr, cells)
 		::continue::
 	end
 	if #pending_images > 0 then
-		vim.schedule(function()
+		vim.defer_fn(function()
 			if not vim.api.nvim_buf_is_valid(bufnr) or render_state[bufnr] ~= generation then
 				return
 			end
@@ -103,7 +103,7 @@ function M.render(bufnr, cells)
 				end
 			end
 			util.request_redraw()
-		end)
+		end, 10)
 	end
 end
 
