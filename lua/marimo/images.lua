@@ -233,19 +233,6 @@ function M.place_image(bufnr, line, src, opts)
 	if not ok or placement == nil then
 		return nil
 	end
-	local function refresh_placement()
-		pcall(function()
-			if placement and type(placement.update) == "function" then
-				placement:update()
-			end
-			if placement and type(placement.show) == "function" then
-				placement:show()
-			end
-		end)
-		pcall(vim.cmd, "redraw")
-	end
-	vim.schedule(refresh_placement)
-	vim.defer_fn(refresh_placement, 20)
 	return placement
 end
 

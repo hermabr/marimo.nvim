@@ -290,9 +290,7 @@ local function test_stringified_image_bundle_outputs_use_snacks_image()
 		},
 	})
 
-	wait_for_truthy(function()
-		return #snacks_image_calls.new > 0
-	end, "timed out waiting for stringified mimebundle placement")
+	assert_truthy(#snacks_image_calls.new > 0, "expected stringified mimebundle placement to be immediate")
 	local call = snacks_image_calls.new[#snacks_image_calls.new]
 	assert_truthy(call.src:match("%.png$") ~= nil, "expected cached png path")
 	assert_truthy(vim.fn.filereadable(call.src) == 1, "expected cached image file to exist")
