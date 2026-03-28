@@ -8,10 +8,10 @@ import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 
 from marimo_nvim_py.projected import dedupe_empty_cells, drop_empty_cells, parse_projected_cells, promote_first_marker_to_marimo
-from marimo_nvim_py.sessions import Worker
+from marimo_nvim_py.sessions import Worker, _extract_marimo_table_metadata
 
 
 RAW_NOTEBOOK = """\
@@ -63,6 +63,57 @@ def console_text(runtime: dict[str, object]) -> list[str]:
         else:
             lines.extend(str(entry["data"]).splitlines())
     return lines
+
+
+MARIMO_TABLE_HTML = (
+    "<marimo-ui-element object-id='table-1' random-id='table-2'>"
+    "<marimo-table data-initial-value='[]' data-label='null' "
+    "data-data='&quot;[{&#92;&quot;number&#92;&quot;:1},{&#92;&quot;number&#92;&quot;:2},{&#92;&quot;number&#92;&quot;:3},"
+    "{&#92;&quot;number&#92;&quot;:4},{&#92;&quot;number&#92;&quot;:5},{&#92;&quot;number&#92;&quot;:6},"
+    "{&#92;&quot;number&#92;&quot;:7},{&#92;&quot;number&#92;&quot;:8},{&#92;&quot;number&#92;&quot;:9},"
+    "{&#92;&quot;number&#92;&quot;:10}]&quot;' "
+    "data-total-rows='100' data-total-columns='1' data-max-columns='50' "
+    "data-banner-text='&quot;&quot;' data-pagination='true' data-page-size='10' "
+    "data-field-types='[[&quot;number&quot;,[&quot;integer&quot;,&quot;i64&quot;]]]' "
+    "data-show-filters='true' data-show-download='true' data-show-column-summaries='false' "
+    "data-show-data-types='true' data-show-page-size-selector='true' "
+    "data-show-column-explorer='true' data-show-chart-builder='false' data-row-headers='[]' "
+    "data-has-stable-row-id='false' data-lazy='false' data-preload='false' "
+    "data-download-file-name='&quot;df&quot;'></marimo-table></marimo-ui-element>"
+)
+
+
+def test_extract_marimo_table_metadata() -> None:
+    metadata = _extract_marimo_table_metadata(MARIMO_TABLE_HTML)
+    assert metadata is not None
+    assert metadata["object_id"] == "table-1"
+    assert metadata["row_count"] == 10
+    assert metadata["total_rows"] == 100
+    assert metadata["rows"][0] == {"number": 1}
+    assert metadata["rows"][-1] == {"number": 10}
+
+
+def test_expand_marimo_table_output_fetches_more_rows(monkeypatch: object) -> None:
+    worker = Worker()
+    expanded_rows = [{"number": idx} for idx in range(1, 101)]
+
+    def fake_invoke_ui_function(*args: object, **kwargs: object) -> dict[str, object]:
+        del args, kwargs
+        return {
+            "data": json.dumps(expanded_rows),
+            "total_rows": 100,
+            "cell_styles": None,
+            "cell_hover_texts": None,
+        }
+
+    cast(Any, monkeypatch).setattr(worker, "_invoke_ui_function", fake_invoke_ui_function)
+    output = {"mimetype": "text/html", "data": MARIMO_TABLE_HTML}
+    expanded = worker._maybe_expand_marimo_table_output(cast(Any, SimpleNamespace()), output)
+    assert expanded is not None
+    metadata = _extract_marimo_table_metadata(expanded["data"])
+    assert metadata is not None
+    assert metadata["row_count"] == 100
+    assert metadata["rows"][-1] == {"number": 100}
 
 
 def test_parse_projected_cells_supports_setup_cell() -> None:

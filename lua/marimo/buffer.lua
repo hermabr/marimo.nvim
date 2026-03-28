@@ -66,6 +66,21 @@ local function apply_runtime_payload(bufnr, payload)
 	util.request_redraw()
 end
 
+local function apply_current_projection_ranges(payload, lines)
+	local ok, ranges_or_err = pcall(markers.projected_cell_ranges, lines)
+	if not ok then
+		return payload, ranges_or_err
+	end
+	local ranges = ranges_or_err
+	for idx, cell in ipairs(payload.cells or {}) do
+		cell.projection_range = ranges[idx] or cell.projection_range
+	end
+	for idx, cell in ipairs((payload.projection_map or {}).cells or {}) do
+		cell.projection_range = ranges[idx] or cell.projection_range
+	end
+	return payload
+end
+
 local function merge_runtime_cells(bufnr, runtime_cells)
 	local cells = vim.b[bufnr].marimo_cells or {}
 	local by_id = vim.b[bufnr].marimo_runtime_cells or {}
@@ -97,13 +112,21 @@ local function mark_cells_pending(bufnr, cell_ids)
 	merge_runtime_cells(bufnr, updates)
 end
 
-local function apply_projection_payload(bufnr, payload, keep_modified)
+
+local function apply_projection_payload(bufnr, payload, keep_modified, opts)
+	opts = opts or {}
+	local update_buffer_lines = opts.update_buffer_lines ~= false
 	local current = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
-	if vim.deep_equal(current, payload.projected_lines or {}) == false then
+	local final_lines = current
+	if update_buffer_lines and vim.deep_equal(current, payload.projected_lines or {}) == false then
+		final_lines = payload.projected_lines or {}
 		with_internal_buffer_update(bufnr, function()
-			vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, payload.projected_lines or {})
+			vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, final_lines)
 		end)
+	elseif update_buffer_lines then
+		final_lines = payload.projected_lines or current
 	end
+	payload = apply_current_projection_ranges(payload, final_lines)
 	apply_runtime_payload(bufnr, payload)
 	lsp_bridge.sync_mirror(bufnr, payload.canonical_source)
 	vim.bo[bufnr].modified = keep_modified and true or false
@@ -120,7 +143,7 @@ local function handle_async_payload(bufnr, generation, keep_modified, payload, e
 	if generation and state_for(bufnr).request_id ~= generation then
 		return
 	end
-	apply_projection_payload(bufnr, payload, keep_modified)
+	apply_projection_payload(bufnr, payload, keep_modified, { update_buffer_lines = false })
 end
 
 local function handle_async_runtime_payload(bufnr, request_id, payload, err)
@@ -154,7 +177,7 @@ local function handle_async_runtime_event(bufnr, request_id, event)
 	end
 	if event.event == "session_update" then
 		local payload = event.payload or {}
-		apply_projection_payload(bufnr, payload, true)
+		apply_projection_payload(bufnr, payload, true, { update_buffer_lines = false })
 	end
 end
 
@@ -250,7 +273,9 @@ local function open_with_worker(bufnr, input_kind, opts)
 		util.notify("failed to open marimo session: " .. err, vim.log.levels.ERROR)
 		return false
 	end
-	apply_projection_payload(bufnr, payload, keep_modified)
+	apply_projection_payload(bufnr, payload, keep_modified, {
+		update_buffer_lines = input_kind ~= "projected",
+	})
 	if opts.ensure_projected_buffer_setup then
 		opts.ensure_projected_buffer_setup(bufnr)
 	end
@@ -325,7 +350,43 @@ function M.sync_buffer(bufnr, opts)
 	if opts.generation and state_for(bufnr).request_id ~= opts.generation then
 		return
 	end
-	apply_projection_payload(bufnr, payload, keep_modified)
+	apply_projection_payload(bufnr, payload, keep_modified, { update_buffer_lines = false })
+end
+
+function M.format_buffer(bufnr)
+	bufnr = bufnr or vim.api.nvim_get_current_buf()
+	local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+	if not markers.has_any_projected_markers(lines) then
+		return false, "current buffer is not a projected marimo buffer"
+	end
+	if not vim.b[bufnr].marimo_projected or not vim.b[bufnr].marimo_session_id then
+		local ok, normalized_or_err = pcall(markers.normalize_projected_buffer_lines, lines)
+		if not ok then
+			return false, normalized_or_err
+		end
+		if vim.deep_equal(lines, normalized_or_err) then
+			return true
+		end
+		with_internal_buffer_update(bufnr, function()
+			vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, normalized_or_err)
+		end)
+		vim.bo[bufnr].modified = true
+		return true
+	end
+	local filepath = vim.api.nvim_buf_get_name(bufnr)
+	local payload, err = worker.request(filepath, "sync_projection", {
+		session_id = vim.b[bufnr].marimo_session_id,
+		content = util.join_lines(lines),
+	})
+	if err then
+		util.notify("failed to format marimo projection: " .. err, vim.log.levels.ERROR)
+		return false, err
+	end
+	local changed = vim.deep_equal(lines, payload.projected_lines or {}) == false
+	apply_projection_payload(bufnr, payload, vim.bo[bufnr].modified or changed, {
+		update_buffer_lines = true,
+	})
+	return true
 end
 
 function M.schedule_sync(bufnr, opts)

@@ -3,9 +3,11 @@ from __future__ import annotations
 import asyncio
 import ast
 import contextlib
+import html
 import hashlib
 import json
 import os
+import re
 import time
 import uuid
 from pathlib import Path
@@ -19,9 +21,9 @@ from marimo._ast.parse import parse_notebook
 from marimo._config.config import PartialMarimoConfig
 from marimo._config.manager import get_default_config_manager
 from marimo._messaging.msgspec_encoder import asdict
-from marimo._messaging.notification import CompletedRunNotification
+from marimo._messaging.notification import CompletedRunNotification, FunctionCallResultNotification
 from marimo._messaging.serde import deserialize_kernel_message
-from marimo._runtime.commands import AppMetadata, ExecuteCellsCommand, SyncGraphCommand
+from marimo._runtime.commands import AppMetadata, ExecuteCellsCommand, InvokeFunctionCommand, SyncGraphCommand
 from marimo._runtime.dataflow import DirectedGraph
 from marimo._schemas.serialization import AppInstantiation, CellDef, Header, NotebookSerializationV1
 from marimo._server.models.models import InstantiateNotebookRequest
@@ -31,6 +33,7 @@ from marimo._session.notebook.file_manager import AppFileManager
 from marimo._session.session import SessionImpl
 from marimo._types.ids import CellId_t
 from marimo._types.ids import ConsumerId
+from marimo._types.ids import RequestId
 
 from marimo_nvim_py.models import Session
 from marimo_nvim_py.projected import (
@@ -41,6 +44,11 @@ from marimo_nvim_py.projected import (
     render_projected_lines,
 )
 
+MARIMO_TABLE_MAX_RENDER_ROWS = 1000
+MARIMO_TABLE_FUNCTION_TIMEOUT_SECONDS = 5.0
+_MARIMO_UI_ELEMENT_TAG_PATTERN = re.compile(r"<marimo-ui-element\b[^>]*object-id=(['\"])(.*?)\1", re.IGNORECASE)
+_MARIMO_TABLE_TAG_PATTERN = re.compile(r"<marimo-table\b[^>]*>", re.IGNORECASE)
+
 def sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
@@ -48,6 +56,7 @@ def sha256_text(text: str) -> str:
 class RuntimeSessionConsumer(SessionConsumer):
     def __init__(self) -> None:
         self.completed_runs = 0
+        self.function_results: dict[str, FunctionCallResultNotification] = {}
 
     @property
     def consumer_id(self) -> ConsumerId:
@@ -57,6 +66,8 @@ class RuntimeSessionConsumer(SessionConsumer):
         decoded = deserialize_kernel_message(cast(Any, notification))
         if isinstance(decoded, CompletedRunNotification):
             self.completed_runs += 1
+        elif isinstance(decoded, FunctionCallResultNotification):
+            self.function_results[str(decoded.function_call_id)] = decoded
 
     def connection_state(self) -> ConnectionState:
         return ConnectionState.OPEN
@@ -67,6 +78,89 @@ class RuntimeSessionConsumer(SessionConsumer):
 
     def on_detach(self) -> None:
         return None
+
+    def pop_function_result(self, function_call_id: str) -> FunctionCallResultNotification | None:
+        return self.function_results.pop(function_call_id, None)
+
+    def clear_function_result(self, function_call_id: str) -> None:
+        self.function_results.pop(function_call_id, None)
+
+
+def _extract_html_attribute(tag_html: str, attribute: str) -> str | None:
+    single_quoted = re.search(rf"{attribute}='([^']*)'", tag_html)
+    if single_quoted is not None:
+        return single_quoted.group(1)
+    double_quoted = re.search(rf'{attribute}="([^"]*)"', tag_html)
+    if double_quoted is not None:
+        return double_quoted.group(1)
+    return None
+
+
+def _decode_json_attribute(value: str | None) -> Any:
+    if not value:
+        return None
+    decoded = html.unescape(value)
+    try:
+        parsed = json.loads(decoded)
+    except json.JSONDecodeError:
+        return None
+    if isinstance(parsed, str):
+        trimmed = parsed.strip()
+        if trimmed.startswith(("[", "{")):
+            try:
+                return json.loads(trimmed)
+            except json.JSONDecodeError:
+                return parsed
+    return parsed
+
+
+def _encode_json_attribute(value: Any) -> str:
+    encoded = json.dumps(json.dumps(value, separators=(",", ":")), separators=(",", ":"))
+    return html.escape(encoded, quote=True).replace("\\", "&#92;")
+
+
+def _replace_html_attribute(tag_html: str, attribute: str, value: str) -> str:
+    escaped_value = value.replace("\\", "\\\\").replace("'", "&#39;")
+    updated, count = re.subn(rf"({attribute}=')([^']*)(')", rf"\1{escaped_value}\3", tag_html, count=1)
+    if count > 0:
+        return updated
+    escaped_value = value.replace("\\", "\\\\").replace('"', "&quot;")
+    updated, count = re.subn(rf'({attribute}=")([^"]*)(")', rf"\1{escaped_value}\3", tag_html, count=1)
+    if count > 0:
+        return updated
+    return tag_html
+
+
+def _extract_marimo_table_metadata(output_data: Any) -> dict[str, Any] | None:
+    if not isinstance(output_data, str) or output_data == "":
+        return None
+    ui_match = _MARIMO_UI_ELEMENT_TAG_PATTERN.search(output_data)
+    table_match = _MARIMO_TABLE_TAG_PATTERN.search(output_data)
+    if ui_match is None or table_match is None:
+        return None
+    object_id = ui_match.group(2)
+    tag_html = table_match.group(0)
+    rows = _decode_json_attribute(_extract_html_attribute(tag_html, "data-data"))
+    if not isinstance(rows, list):
+        return None
+    total_rows = _extract_html_attribute(tag_html, "data-total-rows")
+    try:
+        parsed_total_rows = int(html.unescape(total_rows or ""))
+    except ValueError:
+        parsed_total_rows = len(rows)
+    return {
+        "object_id": object_id,
+        "table_tag": tag_html,
+        "rows": rows,
+        "row_count": len(rows),
+        "total_rows": parsed_total_rows,
+    }
+
+
+def _replace_marimo_table_rows(output_data: str, table_tag: str, rows: list[Any], page_size: int) -> str:
+    updated_tag = _replace_html_attribute(table_tag, "data-data", _encode_json_attribute(rows))
+    updated_tag = _replace_html_attribute(updated_tag, "data-page-size", str(page_size))
+    return output_data.replace(table_tag, updated_tag, 1)
 
 
 def _cell_config(cell: dict[str, Any]) -> CellConfig:
@@ -401,6 +495,89 @@ class Worker:
     def _emit_session_update(self, session: Session, request_id: int | None) -> None:
         self._emit_event("session_update", request_id, self._with_runtime_payload(session))
 
+    def _invoke_ui_function(
+        self,
+        session: Session,
+        namespace: str,
+        function_name: str,
+        args: dict[str, Any],
+        timeout: float = MARIMO_TABLE_FUNCTION_TIMEOUT_SECONDS,
+    ) -> Any | None:
+        if session.runtime_session is None or session.runtime_consumer is None:
+            return None
+        function_call_id = str(uuid.uuid4())
+        session.runtime_consumer.clear_function_result(function_call_id)
+        with self._session_cwd(session):
+            with session.runtime_lock:
+                self._perform_runtime_operation(
+                    lambda: session.runtime_session.put_control_request(
+                        InvokeFunctionCommand(
+                            function_call_id=RequestId(function_call_id),
+                            namespace=namespace,
+                            function_name=function_name,
+                            args=args,
+                        ),
+                        from_consumer_id=None,
+                    )
+                )
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                with session.runtime_lock:
+                    session.runtime_session.flush_messages()
+                result = session.runtime_consumer.pop_function_result(function_call_id)
+                if result is not None:
+                    if result.status.code == "ok":
+                        return result.return_value
+                    return None
+                time.sleep(0.01)
+        return None
+
+    def _maybe_expand_marimo_table_output(
+        self,
+        session: Session,
+        output: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if output is None or output.get("mimetype") != "text/html":
+            return output
+        metadata = _extract_marimo_table_metadata(output.get("data"))
+        if metadata is None:
+            return output
+        desired_rows = min(metadata["total_rows"], MARIMO_TABLE_MAX_RENDER_ROWS)
+        if metadata["row_count"] >= desired_rows:
+            return output
+        result = self._invoke_ui_function(
+            session,
+            namespace=metadata["object_id"],
+            function_name="search",
+            args={
+                "page_size": desired_rows,
+                "page_number": 0,
+                "query": None,
+                "sort": None,
+                "filters": None,
+                "limit": desired_rows,
+            },
+        )
+        if not isinstance(result, dict):
+            return output
+        expanded_rows = result.get("data")
+        if not isinstance(expanded_rows, str):
+            return output
+        try:
+            parsed_rows = json.loads(expanded_rows)
+        except json.JSONDecodeError:
+            return output
+        if not isinstance(parsed_rows, list) or len(parsed_rows) <= metadata["row_count"]:
+            return output
+        expanded_output = dict(output)
+        expanded_output["data"] = _replace_marimo_table_rows(
+            cast(str, output["data"]),
+            metadata["table_tag"],
+            parsed_rows,
+            len(parsed_rows),
+        )
+        return expanded_output
+
     def _changed_runtime_cells(
         self,
         previous: dict[str, dict[str, Any]],
@@ -426,6 +603,7 @@ class Worker:
                 runtime["status"] = notification.status
                 runtime["stale_inputs"] = bool(notification.stale_inputs)
                 runtime["output"] = _cell_output_message(notification.output)
+                runtime["output"] = self._maybe_expand_marimo_table_output(session, runtime["output"])
                 runtime["console"] = _console_messages(notification.console)
                 if _is_internal_error_output(runtime["output"]) and multiple_definition_errors.get(cell_id):
                     runtime["output"] = {

@@ -53,7 +53,7 @@ You can also use:
 - `:MarimoCellPrev`
 - `:MarimoCellNext`
 - `:MarimoOutput`
-- `:MarimoNormalize`
+- `:MarimoFormat`
 
 The default keymaps can be changed or disabled in `setup`:
 

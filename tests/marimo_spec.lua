@@ -485,6 +485,94 @@ local function test_normalize_projected_buffer_lines_deletes_empty_cells()
 	)
 end
 
+local function test_activation_preserves_existing_projected_layout()
+	local path = make_path("preserve_projected_layout.py")
+	local lines = {
+		"# + {marimo}",
+		"",
+		"",
+		"x = 1",
+		"",
+		"# +",
+		"",
+		"",
+		"y = 2",
+	}
+	write_file(path, table.concat(lines, "\n"))
+	edit(path)
+
+	vim.cmd("Marimo on")
+
+	assert_eq(vim.inspect(vim.api.nvim_buf_get_lines(0, 0, -1, false)), vim.inspect(lines))
+end
+
+local function test_sync_buffer_preserves_existing_projected_layout()
+	local path = make_path("sync_preserves_projected_layout.py")
+	write_file(path, table.concat({
+		"# + {marimo}",
+		"",
+		"",
+		"x = 1",
+		"",
+		"# +",
+		"",
+		"",
+		"y = x + 1",
+	}, "\n"))
+	edit(path)
+
+	vim.cmd("Marimo on")
+	vim.api.nvim_buf_set_lines(0, 3, 4, false, { "x = 3" })
+	require("marimo").sync_buffer(0)
+
+	assert_eq(
+		vim.inspect(vim.api.nvim_buf_get_lines(0, 0, -1, false)),
+		vim.inspect({
+			"# + {marimo}",
+			"",
+			"",
+			"x = 3",
+			"",
+			"# +",
+			"",
+			"",
+			"y = x + 1",
+		})
+	)
+end
+
+local function test_marimo_format_command_normalizes_projected_layout()
+	local path = make_path("format_projected_layout.py")
+	write_file(path, table.concat({
+		"# + {marimo}",
+		"",
+		"",
+		"x = 1",
+		"",
+		"# +",
+		"",
+		"",
+		"y = 2",
+	}, "\n"))
+	edit(path)
+
+	vim.cmd("Marimo on")
+	vim.cmd("MarimoFormat")
+
+	assert_eq(
+		vim.inspect(vim.api.nvim_buf_get_lines(0, 0, -1, false)),
+		vim.inspect({
+			"# + {marimo}",
+			"",
+			"x = 1",
+			"",
+			"# +",
+			"",
+			"y = 2",
+		})
+	)
+end
+
 local function test_navigation_commands_jump_between_cells()
 	local path = make_path("navigation.py")
 	write_file(path, "# + {marimo}\n\nx = 1\n\n# +\n\ny = 2\n")
@@ -907,6 +995,88 @@ local function test_runtime_outputs_include_stdout_after_html_output()
 	assert_matches(lines, " HEY")
 end
 
+local function test_runtime_html_tables_are_summarized_as_text()
+	local path = make_path("runtime_html_table.py")
+	write_file(
+		path,
+		[[# + {marimo}
+
+class Thing:
+    def _repr_html_(self):
+        return """<div><style>
+.dataframe > thead > tr,
+.dataframe > tbody > tr {
+  text-align: right;
+  white-space: pre-wrap;
+}
+</style><small>shape: (7, 1)</small><table border="1" class="dataframe"><thead><tr><th>number</th></tr><tr><td>i64</td></tr></thead><tbody><tr><td>1</td></tr><tr><td>2</td></tr><tr><td>3</td></tr><tr><td>4</td></tr><tr><td>5</td></tr><tr><td>6</td></tr><tr><td>7</td></tr></tbody></table></div>"""
+
+Thing()
+]]
+	)
+	edit(path)
+
+	vim.cmd("Marimo on")
+	vim.cmd("MarimoRunAll")
+	wait_for_match(" shape: %(7, 1%)")
+	wait_for_match(" number")
+	wait_for_match(" i64")
+	wait_for_match(" 7")
+
+	local lines = table.concat(rendered_lines(), "\n")
+	assert_matches(lines, " shape: %(7, 1%)")
+	assert_matches(lines, " number")
+	assert_matches(lines, " i64")
+	assert_matches(lines, " 7")
+	assert_truthy(not lines:match("%.dataframe"), "expected table styles to be removed")
+	assert_truthy(not lines:match("%[html output%]"), "expected html table summary instead of placeholder")
+end
+
+local function test_runtime_markdown_html_is_summarized_as_text()
+	local path = make_path("runtime_markdown_html.py")
+	write_file(path, '# + {marimo}\n\nimport marimo as mo\nmo.md("# hello")')
+	edit(path)
+
+	vim.cmd("Marimo on")
+	vim.cmd("MarimoRunAll")
+	wait_for_match(" hello")
+
+	local lines = table.concat(rendered_lines(), "\n")
+	assert_matches(lines, " hello")
+	assert_truthy(not lines:match("<span"), "expected markdown html wrapper to be stripped")
+	assert_truthy(not lines:match("<h1"), "expected markdown html headings to be stripped")
+	assert_truthy(not lines:match("%[html output%]"), "expected markdown html to render as text")
+end
+
+local function test_runtime_marimo_table_html_is_summarized_as_text()
+	local render = dofile(vim.fn.getcwd() .. "/lua/marimo/render.lua")
+	local path = make_path("runtime_marimo_table.py")
+	write_file(path, "# + {marimo}\n\ndf = None")
+	edit(path)
+
+	render.render(0, {
+		{
+			id = "cell-1",
+			projection_range = { start_line = 1, end_line = 3 },
+			runtime = {
+				output = {
+					mimetype = "text/html",
+					data = "<marimo-ui-element object-id='table-1' random-id='table-2'><marimo-table data-initial-value='[]' data-label='null' data-data='&quot;[{&#92;&quot;number&#92;&quot;:1},{&#92;&quot;number&#92;&quot;:2},{&#92;&quot;number&#92;&quot;:3},{&#92;&quot;number&#92;&quot;:4},{&#92;&quot;number&#92;&quot;:5},{&#92;&quot;number&#92;&quot;:6},{&#92;&quot;number&#92;&quot;:7}]&quot;' data-total-rows='7' data-total-columns='1' data-max-columns='50' data-banner-text='&quot;&quot;' data-pagination='true' data-page-size='10' data-field-types='[[&quot;number&quot;,[&quot;integer&quot;,&quot;i64&quot;]]]' data-show-filters='true' data-show-download='true' data-show-column-summaries='false' data-show-data-types='true' data-show-page-size-selector='true' data-show-column-explorer='true' data-show-chart-builder='false' data-row-headers='[]' data-has-stable-row-id='false' data-lazy='false' data-preload='false' data-download-file-name='&quot;df&quot;'></marimo-table></marimo-ui-element>",
+				},
+				console = {},
+			},
+		},
+	})
+
+	local lines = table.concat(rendered_lines(), "\n")
+	assert_matches(lines, " shape: %(7, 1%)")
+	assert_matches(lines, " number")
+	assert_matches(lines, " i64")
+	assert_matches(lines, " 7")
+	assert_truthy(not lines:match("%[html output%]"), "expected marimo table summary instead of placeholder")
+	assert_truthy(not lines:match("marimo%-table"), "expected custom element markup to be stripped")
+end
+
 local function test_runtime_errors_include_descriptive_stderr_context()
 	local path = make_path("runtime_error_details.py")
 	write_file(path, "# + {marimo}\n\nimport numpy as np\n= np.array(object=[1, 2, 3])\nx")
@@ -984,6 +1154,9 @@ local tests = {
 	test_manual_activation_rejects_unnamed_buffers,
 	test_manual_activation_preserves_dirty_state,
 	test_normalize_projected_buffer_lines_deletes_empty_cells,
+	test_activation_preserves_existing_projected_layout,
+	test_sync_buffer_preserves_existing_projected_layout,
+	test_marimo_format_command_normalizes_projected_layout,
 	test_navigation_commands_jump_between_cells,
 	test_navigation_keymap_callbacks_work,
 	test_output_keymap_opens_scrollable_float,
@@ -1005,6 +1178,9 @@ local tests = {
 	test_reentering_buffer_does_not_rerun_runtime,
 	test_runtime_outputs_include_stdout,
 	test_runtime_outputs_include_stdout_after_html_output,
+	test_runtime_html_tables_are_summarized_as_text,
+	test_runtime_markdown_html_is_summarized_as_text,
+	test_runtime_marimo_table_html_is_summarized_as_text,
 	test_runtime_errors_include_descriptive_stderr_context,
 	test_runtime_errors_show_multiple_definition_details,
 	test_run_current_cell_command_refreshes_output,

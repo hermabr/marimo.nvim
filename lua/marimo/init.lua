@@ -105,6 +105,7 @@ end
 
 M.write_buffer = buffer.write_buffer
 M.sync_buffer = buffer.sync_buffer
+M.format_buffer = buffer.format_buffer
 M.run_current_cell = buffer.run_current_cell
 M.run_all_cells = buffer.run_all_cells
 M.open_current_output = buffer.open_current_output

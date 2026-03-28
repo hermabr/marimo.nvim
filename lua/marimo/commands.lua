@@ -84,9 +84,9 @@ function M.setup(opts)
 		api.interrupt(0)
 	end, {})
 
-	vim.api.nvim_create_user_command("MarimoNormalize", function()
-		local _, err = api.normalize_buffer(0)
-		if err then
+	vim.api.nvim_create_user_command("MarimoFormat", function()
+		local ok, err = api.format_buffer(0)
+		if not ok and err then
 			util.notify(err, vim.log.levels.WARN)
 		end
 	end, {})
