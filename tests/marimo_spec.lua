@@ -391,6 +391,94 @@ local function test_normalize_projected_buffer_lines_deletes_empty_cells()
 	)
 end
 
+local function test_activation_preserves_existing_projected_layout()
+	local path = make_path("preserve_projected_layout.py")
+	local lines = {
+		"# + {marimo}",
+		"",
+		"",
+		"x = 1",
+		"",
+		"# +",
+		"",
+		"",
+		"y = 2",
+	}
+	write_file(path, table.concat(lines, "\n"))
+	edit(path)
+
+	vim.cmd("Marimo on")
+
+	assert_eq(vim.inspect(vim.api.nvim_buf_get_lines(0, 0, -1, false)), vim.inspect(lines))
+end
+
+local function test_sync_buffer_preserves_existing_projected_layout()
+	local path = make_path("sync_preserves_projected_layout.py")
+	write_file(path, table.concat({
+		"# + {marimo}",
+		"",
+		"",
+		"x = 1",
+		"",
+		"# +",
+		"",
+		"",
+		"y = x + 1",
+	}, "\n"))
+	edit(path)
+
+	vim.cmd("Marimo on")
+	vim.api.nvim_buf_set_lines(0, 3, 4, false, { "x = 3" })
+	require("marimo").sync_buffer(0)
+
+	assert_eq(
+		vim.inspect(vim.api.nvim_buf_get_lines(0, 0, -1, false)),
+		vim.inspect({
+			"# + {marimo}",
+			"",
+			"",
+			"x = 3",
+			"",
+			"# +",
+			"",
+			"",
+			"y = x + 1",
+		})
+	)
+end
+
+local function test_marimo_format_command_normalizes_projected_layout()
+	local path = make_path("format_projected_layout.py")
+	write_file(path, table.concat({
+		"# + {marimo}",
+		"",
+		"",
+		"x = 1",
+		"",
+		"# +",
+		"",
+		"",
+		"y = 2",
+	}, "\n"))
+	edit(path)
+
+	vim.cmd("Marimo on")
+	vim.cmd("MarimoFormat")
+
+	assert_eq(
+		vim.inspect(vim.api.nvim_buf_get_lines(0, 0, -1, false)),
+		vim.inspect({
+			"# + {marimo}",
+			"",
+			"x = 1",
+			"",
+			"# +",
+			"",
+			"y = 2",
+		})
+	)
+end
+
 local function test_navigation_commands_jump_between_cells()
 	local path = make_path("navigation.py")
 	write_file(path, "# + {marimo}\n\nx = 1\n\n# +\n\ny = 2\n")
@@ -890,6 +978,9 @@ local tests = {
 	test_manual_activation_rejects_unnamed_buffers,
 	test_manual_activation_preserves_dirty_state,
 	test_normalize_projected_buffer_lines_deletes_empty_cells,
+	test_activation_preserves_existing_projected_layout,
+	test_sync_buffer_preserves_existing_projected_layout,
+	test_marimo_format_command_normalizes_projected_layout,
 	test_navigation_commands_jump_between_cells,
 	test_navigation_keymap_callbacks_work,
 	test_output_keymap_opens_scrollable_float,

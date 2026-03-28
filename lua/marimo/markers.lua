@@ -144,6 +144,51 @@ local function trim_blank_lines(lines)
 	return trimmed
 end
 
+local function parse_projected_buffer_cells(lines)
+	local cells = {}
+	local current = nil
+
+	local function flush(end_line)
+		if not current then
+			return
+		end
+
+		current.body = trim_blank_lines(current.body)
+		current.range = {
+			start_line = current.start_line,
+			start_col = 1,
+			end_line = math.max(end_line, current.start_line),
+			end_col = 1,
+		}
+		table.insert(cells, current)
+		current = nil
+	end
+
+	for line_number, line in ipairs(lines) do
+		local is_marker, marker = M.parse_marker_line(line)
+		if is_marker then
+			flush(line_number - 1)
+			current = {
+				options = parse_options_text(marker),
+				body = {},
+				start_line = line_number,
+			}
+		elseif current then
+			table.insert(current.body, line)
+		end
+	end
+	flush(#lines)
+
+	if #cells == 0 then
+		error("projected marimo buffer has no `# +` cells")
+	end
+	if cells[1].options.marimo ~= true then
+		error("first cell must be marked with `{marimo}`")
+	end
+
+	return cells
+end
+
 function M.parse_marker_line(line)
 	if line == "# +" then
 		return true, nil
@@ -227,37 +272,7 @@ function M.promote_first_marker_to_marimo(lines)
 end
 
 function M.normalize_projected_buffer_lines(lines)
-	local cells = {}
-	local current = nil
-
-	local function flush()
-		if not current then
-			return
-		end
-
-		current.body = trim_blank_lines(current.body)
-		table.insert(cells, current)
-		current = nil
-	end
-
-	for _, line in ipairs(lines) do
-		local is_marker, marker = M.parse_marker_line(line)
-		if is_marker then
-			flush()
-			current = {
-				options = parse_options_text(marker),
-				body = {},
-			}
-		elseif current then
-			table.insert(current.body, line)
-		end
-	end
-	flush()
-
-	if #cells == 0 then
-		error("projected marimo buffer has no `# +` cells")
-	end
-
+	local cells = parse_projected_buffer_cells(lines)
 	local normalized_cells = {}
 	for idx, cell in ipairs(cells) do
 		local is_empty = #cell.body == 0
@@ -265,13 +280,6 @@ function M.normalize_projected_buffer_lines(lines)
 		if not is_empty or keep_empty then
 			table.insert(normalized_cells, cell)
 		end
-	end
-
-	if #normalized_cells == 0 then
-		error("projected marimo buffer has no `# +` cells")
-	end
-	if normalized_cells[1].options.marimo ~= true then
-		error("first cell must be marked with `{marimo}`")
 	end
 
 	local normalized = {}
@@ -289,6 +297,20 @@ function M.normalize_projected_buffer_lines(lines)
 	end
 
 	return normalized
+end
+
+function M.projected_cell_ranges(lines)
+	local cells = parse_projected_buffer_cells(lines)
+	local ranges = {}
+	for _, cell in ipairs(cells) do
+		if #cell.body > 0 then
+			table.insert(ranges, vim.deepcopy(cell.range))
+		end
+	end
+	if #ranges == 0 then
+		table.insert(ranges, vim.deepcopy(cells[1].range))
+	end
+	return ranges
 end
 
 function M.render_projected_buffer_lines(cells)
