@@ -1,35 +1,11 @@
 local M = {}
+local rich_output = dofile(vim.fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":h") .. "/rich_output.lua")
 
 local function as_string(value)
 	if type(value) == "string" then
 		return value
 	end
 	return nil
-end
-
-local function decode_stringified_bundle(data)
-	if type(data) ~= "string" or data == "" or vim.json == nil then
-		return nil
-	end
-	local trimmed = vim.trim(data)
-	if trimmed:sub(1, 1) ~= "{" then
-		return nil
-	end
-	local ok, decoded = pcall(vim.json.decode, trimmed)
-	if not ok or type(decoded) ~= "table" then
-		return nil
-	end
-	local has_mimetype_key = false
-	for key, _ in pairs(decoded) do
-		if type(key) == "string" and (key == "text/plain" or key == "text/html" or key:match("^image/") or key:match("^video/")) then
-			has_mimetype_key = true
-			break
-		end
-	end
-	if not has_mimetype_key then
-		return nil
-	end
-	return decoded
 end
 
 local function limit_lines(lines, opts)
@@ -165,6 +141,25 @@ local function render_bundle_output(data, opts)
 	return { placeholder_for_mimetype(media_mimetype or "application/vnd.marimo+mimebundle") }, "Comment"
 end
 
+local function render_marshaled_json_output(data, opts)
+	local decoded = data
+	if type(data) == "string" then
+		decoded = rich_output.decode_json_value(data)
+	end
+	if decoded == nil then
+		return nil
+	end
+	local sanitized = rich_output.sanitize_marshaled_value(decoded)
+	if sanitized == rich_output.REMOVE then
+		return {}, nil
+	end
+	local ok, encoded = pcall(vim.json.encode, sanitized)
+	if not ok or type(encoded) ~= "string" then
+		return nil
+	end
+	return split_lines(encoded, opts), "String"
+end
+
 local function render_output(output, opts)
 	opts = opts or {}
 	if type(output) ~= "table" then
@@ -172,9 +167,15 @@ local function render_output(output, opts)
 	end
 	local mimetype = as_string(output.mimetype) or ""
 	local data = output.data
-	local decoded_bundle = decode_stringified_bundle(data)
+	local decoded_bundle = rich_output.decode_stringified_bundle(data)
 	if decoded_bundle then
 		return render_bundle_output(decoded_bundle, opts)
+	end
+	if mimetype == "application/json" then
+		local lines, highlight = render_marshaled_json_output(data, opts)
+		if lines ~= nil then
+			return lines, highlight
+		end
 	end
 	if mimetype == "text/plain" or mimetype == "text/markdown" or mimetype == "text/latex" then
 		return split_lines(data, opts), "String"
@@ -216,7 +217,13 @@ local function render_console(console, opts)
 		local data = entry.data
 		if channel == "media" then
 			if not opts.console_image_resolved then
-				table.insert(lines, placeholder_for_mimetype(mimetype))
+				local decoded_bundle = rich_output.decode_stringified_bundle(data)
+				if decoded_bundle then
+					local media_mimetype = first_bundle_media_mimetype(decoded_bundle)
+					table.insert(lines, placeholder_for_mimetype(media_mimetype or mimetype))
+				else
+					table.insert(lines, placeholder_for_mimetype(mimetype))
+				end
 			end
 		elseif type(data) == "string" then
 			local chunks = mimetype == "text/html" and html_to_text(data, opts) or vim.split(data, "\n", { plain = true })

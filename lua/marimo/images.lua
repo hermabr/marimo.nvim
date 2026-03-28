@@ -1,4 +1,5 @@
 local M = {}
+local rich_output = dofile(vim.fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":h") .. "/rich_output.lua")
 
 local IMAGE_CACHE_DIR = vim.fn.stdpath("cache") .. "/marimo.nvim/images"
 
@@ -40,7 +41,7 @@ local function image_extension(mimetype)
 end
 
 local function write_cached_image_file(mimetype, encoded_data)
-	if encoded_data == nil or vim.base64 == nil then
+	if encoded_data == nil then
 		return nil
 	end
 	local payload = tostring(encoded_data):gsub("%s+", "")
@@ -48,8 +49,45 @@ local function write_cached_image_file(mimetype, encoded_data)
 		return nil
 	end
 	mimetype = tostring(mimetype or "")
-	local ok, decoded = pcall(vim.base64.decode, payload)
-	if not ok or type(decoded) ~= "string" or decoded == "" then
+	local decode_ok = true
+	local decoded
+	if vim.base64 and type(vim.base64.decode) == "function" then
+		decode_ok, decoded = pcall(vim.base64.decode, payload)
+		if not decode_ok then
+			decoded = nil
+		end
+	else
+		local alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+		local clean = payload:gsub("[^" .. alphabet .. "=]", "")
+		local bit_pattern = clean:gsub(".", function(char)
+			if char == "=" then
+				return ""
+			end
+			local index = alphabet:find(char, 1, true)
+			if not index then
+				return ""
+			end
+			local value = index - 1
+			local bits = {}
+			for bit = 6, 1, -1 do
+				bits[#bits + 1] = value % 2 ^ bit - value % 2 ^ (bit - 1) > 0 and "1" or "0"
+			end
+			return table.concat(bits)
+		end)
+		local bytes = {}
+		for index = 1, #bit_pattern - 7, 8 do
+			local chunk = bit_pattern:sub(index, index + 7)
+			local value = 0
+			for bit = 1, 8 do
+				if chunk:sub(bit, bit) == "1" then
+					value = value + 2 ^ (8 - bit)
+				end
+			end
+			bytes[#bytes + 1] = string.char(value)
+		end
+		decoded = table.concat(bytes)
+	end
+	if not decode_ok or type(decoded) ~= "string" or decoded == "" then
 		return nil
 	end
 	vim.fn.mkdir(IMAGE_CACHE_DIR, "p")
@@ -91,26 +129,6 @@ function M.image_source_from_value(mimetype, data)
 	return nil
 end
 
-local function decode_stringified_bundle(data)
-	if type(data) ~= "string" or data == "" or vim.json == nil then
-		return nil
-	end
-	local trimmed = vim.trim(data)
-	if trimmed:sub(1, 1) ~= "{" then
-		return nil
-	end
-	local ok, decoded = pcall(vim.json.decode, trimmed)
-	if not ok or type(decoded) ~= "table" then
-		return nil
-	end
-	for key, _ in pairs(decoded) do
-		if type(key) == "string" and (key == "text/plain" or key == "text/html" or key:match("^image/")) then
-			return decoded
-		end
-	end
-	return nil
-end
-
 local function extract_bundle_image(data)
 	if type(data) ~= "table" then
 		return nil
@@ -139,11 +157,24 @@ function M.extract_output_image(output)
 	end
 	local mimetype = as_string(output.mimetype) or ""
 	local data = output.data
-	local decoded_bundle = decode_stringified_bundle(data)
+	local decoded_bundle = rich_output.decode_stringified_bundle(data)
 	if decoded_bundle then
 		local src = extract_bundle_image(decoded_bundle)
 		if src then
 			return src
+		end
+	end
+	if mimetype == "application/json" then
+		local decoded = data
+		if type(data) == "string" then
+			decoded = rich_output.decode_json_value(data)
+		end
+		local bundle = rich_output.find_first_bundle(decoded)
+		if bundle then
+			local src = extract_bundle_image(bundle)
+			if src then
+				return src
+			end
 		end
 	end
 	if mimetype:match("^image/") then
@@ -166,6 +197,13 @@ function M.extract_console_image(console)
 		local channel = as_string(entry.channel) or "stdout"
 		local mimetype = as_string(entry.mimetype) or "text/plain"
 		if channel == "media" then
+			local decoded_bundle = rich_output.decode_stringified_bundle(entry.data)
+			if decoded_bundle then
+				local src = extract_bundle_image(decoded_bundle)
+				if src then
+					return src
+				end
+			end
 			local src = M.image_source_from_value(mimetype, entry.data)
 			if src then
 				return src

@@ -33,4 +33,10 @@ function M.as_json_object(tbl)
 	return tbl
 end
 
+function M.request_redraw()
+	vim.schedule(function()
+		pcall(vim.cmd, "redraw")
+	end)
+end
+
 return M
