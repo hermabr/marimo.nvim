@@ -63,6 +63,7 @@ local function apply_runtime_payload(bufnr, payload)
 	end
 	render.render(bufnr, payload.cells)
 	output_window.refresh(bufnr)
+	util.request_redraw()
 end
 
 local function apply_current_projection_ranges(payload, lines)
@@ -94,6 +95,7 @@ local function merge_runtime_cells(bufnr, runtime_cells)
 	end
 	render.render(bufnr, cells)
 	output_window.refresh(bufnr)
+	util.request_redraw()
 end
 
 local function mark_cells_pending(bufnr, cell_ids)

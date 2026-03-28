@@ -290,10 +290,104 @@ local function test_stringified_image_bundle_outputs_use_snacks_image()
 		},
 	})
 
-	assert_truthy(#snacks_image_calls.new > 0, "expected image placement for stringified mimebundle")
+	wait_for_truthy(function()
+		return #snacks_image_calls.new > 0
+	end, "timed out waiting for stringified mimebundle placement")
 	local call = snacks_image_calls.new[#snacks_image_calls.new]
 	assert_truthy(call.src:match("%.png$") ~= nil, "expected cached png path")
 	assert_truthy(vim.fn.filereadable(call.src) == 1, "expected cached image file to exist")
+end
+
+local function test_console_mimebundle_outputs_render_as_images()
+	local render = dofile(vim.fn.getcwd() .. "/lua/marimo/render.lua")
+	local path = make_path("console_mimebundle.py")
+	reset_snacks_image_calls()
+	write_file(path, "# + {marimo}\n\nx = 1")
+	edit(path)
+
+	render.render(0, {
+		{
+			id = "cell-1",
+			projection_range = { start_line = 1, end_line = 3 },
+			runtime = {
+				output = {
+					mimetype = "text/plain",
+					data = "",
+				},
+				console = {
+					{
+						channel = "media",
+						mimetype = "application/vnd.marimo+mimebundle",
+						data = '{"image/png": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wn9lD8AAAAASUVORK5CYII=", "__metadata__": {"image/png": {"width": 543, "height": 413}}}',
+					},
+				},
+			},
+		},
+	})
+
+	wait_for_truthy(function()
+		return #snacks_image_calls.new > 0
+	end, "timed out waiting for console mimebundle placement")
+	local marks = vim.api.nvim_buf_get_extmarks(0, -1, 0, -1, { details = true })
+	local lines = {}
+	for _, mark in ipairs(marks) do
+		for _, virt in ipairs((mark[4] or {}).virt_lines or {}) do
+			local chunks = {}
+			for _, chunk in ipairs(virt) do
+				table.insert(chunks, chunk[1])
+			end
+			table.insert(lines, table.concat(chunks, ""))
+		end
+	end
+	lines = table.concat(lines, "\n")
+	assert_truthy(not lines:match("%[widget output%]"), "expected image placeholder, not widget placeholder")
+	assert_truthy(not lines:match("application/vnd%.marimo%+mimebundle"), "expected mimebundle sentinel to stay hidden")
+end
+
+local function test_marshaled_json_outputs_render_text_and_images()
+	local render = dofile(vim.fn.getcwd() .. "/lua/marimo/render.lua")
+	local path = make_path("marshaled_json_output.py")
+	reset_snacks_image_calls()
+	write_file(path, "# + {marimo}\n\nx = 1")
+	edit(path)
+
+	local token = "application/vnd.marimo+mimebundle:"
+		.. vim.json.encode({
+			["image/png"] = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wn9lD8AAAAASUVORK5CYII=",
+			__metadata__ = { ["image/png"] = { width = 543, height = 413 } },
+		})
+
+	render.render(0, {
+		{
+			id = "cell-1",
+			projection_range = { start_line = 1, end_line = 3 },
+			runtime = {
+				output = {
+					mimetype = "application/json",
+					data = vim.json.encode({ 1, { token } }),
+				},
+				console = {},
+			},
+		},
+	})
+
+	wait_for_truthy(function()
+		return #snacks_image_calls.new > 0
+	end, "timed out waiting for marshaled json placement")
+	local marks = vim.api.nvim_buf_get_extmarks(0, -1, 0, -1, { details = true })
+	local lines = {}
+	for _, mark in ipairs(marks) do
+		for _, virt in ipairs((mark[4] or {}).virt_lines or {}) do
+			local chunks = {}
+			for _, chunk in ipairs(virt) do
+				table.insert(chunks, chunk[1])
+			end
+			table.insert(lines, table.concat(chunks, ""))
+		end
+	end
+	lines = table.concat(lines, "\n")
+	assert_matches(lines, " %[1%]")
+	assert_truthy(not lines:match("application/vnd%.marimo%+mimebundle"), "expected mimebundle sentinel to stay hidden")
 end
 
 local function test_deactivation_clears_runtime_image_placements()
@@ -1073,6 +1167,8 @@ local tests = {
 	test_runtime_outputs_render_below_cells,
 	test_runtime_image_outputs_use_snacks_image,
 	test_stringified_image_bundle_outputs_use_snacks_image,
+	test_console_mimebundle_outputs_render_as_images,
+	test_marshaled_json_outputs_render_text_and_images,
 	test_write_does_not_block_while_runtime_is_running,
 	test_run_all_shows_per_cell_running_placeholders,
 	test_new_cell_autorun_streams_runtime_updates,
