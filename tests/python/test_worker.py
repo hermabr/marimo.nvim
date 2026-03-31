@@ -10,7 +10,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
-from marimo_nvim_py.projected import dedupe_empty_cells, drop_empty_cells, parse_projected_cells, promote_first_marker_to_marimo
+from marimo_nvim_py.projected import (
+    dedupe_empty_cells,
+    drop_empty_cells,
+    parse_projected_cells,
+    promote_first_marker_to_marimo,
+    render_projected_lines,
+)
 from marimo_nvim_py.sessions import Worker, _extract_marimo_table_metadata
 
 
@@ -133,6 +139,38 @@ def test_parse_projected_cells_supports_setup_cell() -> None:
     assert cells[1]["name"] == "_"
 
 
+def test_parse_projected_cells_supports_marimo_disabled_marker() -> None:
+    cells = parse_projected_cells(
+        [
+            "# + {marimo, marimo_disabled}",
+            "x = 1",
+        ]
+    )
+    assert len(cells) == 1
+    assert cells[0]["options"] == {"disabled": True}
+
+
+def test_render_options_omits_empty_braces_for_disabled_false() -> None:
+    worker = Worker()
+    path = "notebook.py"
+    canonical_source, projection_map, cells = worker._build_notebook(
+        path,
+        None,
+        {},
+        [
+            {
+                "id": "cell-1",
+                "name": "_",
+                "code": "x = 1",
+                "options": {"disabled": False},
+                "editor_status": "clean",
+            }
+        ],
+    )
+    del canonical_source, projection_map
+    assert render_projected_lines(cells)[0][0] == "# + {marimo}"
+
+
 def test_dedupe_empty_cells() -> None:
     cells = dedupe_empty_cells(
         [
@@ -199,6 +237,37 @@ def test_open_session_from_raw_notebook(tmp_path: Path) -> None:
     assert result["projected_lines"][0] == "# + {marimo}"
     assert "@app.cell" in result["canonical_source"]
     assert result["projection_map"]["cells"][0]["canonical_range"]["start_line"] > 0
+
+
+def test_open_session_from_raw_notebook_renders_disabled_marker(tmp_path: Path) -> None:
+    worker = Worker()
+    path = tmp_path / "disabled_notebook.py"
+    raw = """\
+import marimo
+
+app = marimo.App()
+
+
+@app.cell(disabled=True)
+def _():
+    x = 1
+    return (x,)
+
+
+if __name__ == "__main__":
+    app.run()
+"""
+    result = worker.open_session(
+        {
+            "path": str(path),
+            "content": raw,
+            "input_kind": "raw_marimo",
+            "project_root": str(tmp_path),
+            "runtime_kind": "uv_project",
+        }
+    )
+    assert result["projected_lines"][0] == "# + {marimo,marimo_disabled}"
+    assert result["cells"][0]["options"] == {"disabled": True}
 
 
 def test_sync_projection_preserves_stable_ids(tmp_path: Path) -> None:
@@ -491,6 +560,48 @@ def test_sync_and_run_updates_descendant_outputs(tmp_path: Path) -> None:
     )
     assert_text_output(updated["cells"][0]["runtime"], "3")
     assert_text_output(updated["cells"][1]["runtime"], "4")
+    worker.shutdown({})
+
+
+def test_sync_and_run_does_not_autorun_disabled_cells_or_dependents(tmp_path: Path) -> None:
+    worker = Worker()
+    path = tmp_path / "reactive_disabled.py"
+    initial = worker.open_session(
+        {
+            "path": str(path),
+            "content": "# + {marimo,marimo_disabled}\n\nx = 1\nx\n\n# +\n\ny = x + 1\ny",
+            "input_kind": "projected",
+            "project_root": str(tmp_path),
+            "runtime_kind": "uv_project",
+        }
+    )
+    updated = worker.sync_and_run(
+        {
+            "session_id": initial["session_id"],
+            "content": "# + {marimo,marimo_disabled}\n\nx = 3\nx\n\n# +\n\ny = x + 1\ny",
+        }
+    )
+    assert_no_output(updated["cells"][0]["runtime"])
+    assert_no_output(updated["cells"][1]["runtime"])
+    assert updated["cells"][0]["runtime"]["status"] in {None, "idle"}
+    assert updated["cells"][1]["disabled_transitively"] is True
+    worker.shutdown({})
+
+
+def test_run_cells_does_not_run_disabled_cells(tmp_path: Path) -> None:
+    worker = Worker()
+    path = tmp_path / "runtime_disabled.py"
+    initial = worker.open_session(
+        {
+            "path": str(path),
+            "content": "# + {marimo,marimo_disabled}\n\nx = 1\nx",
+            "input_kind": "projected",
+            "project_root": str(tmp_path),
+            "runtime_kind": "uv_project",
+        }
+    )
+    result = worker.run_cells({"session_id": initial["session_id"], "cell_ids": [initial["cells"][0]["id"]]})
+    assert_no_output(result["cells"][0]["runtime"])
     worker.shutdown({})
 
 

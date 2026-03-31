@@ -15,6 +15,7 @@ local setup_opts = {
 	keymaps = {
 		prev_cell = "[m",
 		next_cell = "]m",
+		toggle_disabled = "<leader>md",
 		show_output = "<leader>mo",
 	},
 }
@@ -81,6 +82,11 @@ local function ensure_navigation_keymaps(bufnr)
 			M.jump_next_cell(bufnr)
 		end, { buffer = bufnr, silent = true, desc = "Marimo: next cell" })
 	end
+	if keymaps.toggle_disabled then
+		vim.keymap.set("n", keymaps.toggle_disabled, function()
+			M.toggle_current_cell_disabled(bufnr)
+		end, { buffer = bufnr, silent = true, desc = "Marimo: toggle cell disabled" })
+	end
 	if keymaps.show_output then
 		vim.keymap.set("n", keymaps.show_output, function()
 			M.open_current_output(bufnr)
@@ -108,6 +114,7 @@ M.sync_buffer = buffer.sync_buffer
 M.format_buffer = buffer.format_buffer
 M.run_current_cell = buffer.run_current_cell
 M.run_all_cells = buffer.run_all_cells
+M.toggle_current_cell_disabled = buffer.toggle_current_cell_disabled
 M.open_current_output = buffer.open_current_output
 M.interrupt = buffer.interrupt
 

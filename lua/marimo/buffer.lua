@@ -112,6 +112,33 @@ local function mark_cells_pending(bufnr, cell_ids)
 	merge_runtime_cells(bufnr, updates)
 end
 
+local function update_cell_marker(bufnr, cell, mutate)
+	local range = cell.projection_range or {}
+	local marker_row = math.max((range.start_line or 1) - 1, 0)
+	local marker_line = vim.api.nvim_buf_get_lines(bufnr, marker_row, marker_row + 1, false)[1]
+	if not marker_line then
+		return false, "no current marimo cell"
+	end
+
+	local ok, marker = markers.parse_marker_line(marker_line)
+	if not ok then
+		return false, "current cell marker is invalid"
+	end
+
+	local opts = markers.parse_options_text(marker)
+	mutate(opts)
+	local updated = "# +" .. markers.render_options(opts)
+	if updated == marker_line then
+		return true
+	end
+
+	with_internal_buffer_update(bufnr, function()
+		vim.api.nvim_buf_set_lines(bufnr, marker_row, marker_row + 1, false, { updated })
+	end)
+	vim.bo[bufnr].modified = true
+	return true
+end
+
 
 local function apply_projection_payload(bufnr, payload, keep_modified, opts)
 	opts = opts or {}
@@ -491,6 +518,29 @@ function M.interrupt(bufnr)
 	}, function(payload, err)
 		handle_async_runtime_payload(bufnr, request_id, payload, err)
 	end)
+end
+
+function M.toggle_current_cell_disabled(bufnr)
+	bufnr = bufnr or vim.api.nvim_get_current_buf()
+	if not vim.b[bufnr].marimo_projected or not vim.b[bufnr].marimo_session_id then
+		return
+	end
+
+	local cell = navigation.find_current_cell(bufnr)
+	if not cell then
+		util.notify("no current marimo cell", vim.log.levels.WARN)
+		return
+	end
+
+	local ok, err = update_cell_marker(bufnr, cell, function(opts)
+		opts.disabled = not (opts.disabled == true)
+	end)
+	if not ok then
+		util.notify(err, vim.log.levels.WARN)
+		return
+	end
+
+	M.sync_buffer(bufnr, { autorun = false })
 end
 
 function M.open_current_output(bufnr)

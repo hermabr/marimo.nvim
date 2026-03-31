@@ -67,6 +67,9 @@ def parse_options_text(text: str | None) -> dict[str, Any]:
         if item == "marimo":
             opts["marimo"] = True
             continue
+        if item == "marimo_disabled":
+            opts["disabled"] = True
+            continue
         if "=" not in item:
             raise ValueError(f"invalid option: {item}")
         key, value = item.split("=", 1)
@@ -88,16 +91,18 @@ def render_scalar(value: Any) -> str:
 
 
 def render_options(opts: dict[str, Any]) -> str:
-    if not opts:
-        return ""
     keys = sorted(opts.keys())
     parts: list[str] = []
     if opts.get("marimo"):
         parts.append("marimo")
+    if opts.get("disabled"):
+        parts.append("marimo_disabled")
     for key in keys:
-        if key == "marimo":
+        if key in {"marimo", "disabled"}:
             continue
         parts.append(f"{key}={render_scalar(opts[key])}")
+    if not parts:
+        return ""
     return " {" + ",".join(parts) + "}"
 
 
