@@ -863,6 +863,60 @@ local function test_runtime_outputs_render_below_cells()
 	assert_truthy(not lines:match("marimo idle"))
 end
 
+local function test_partial_runtime_render_keeps_unrelated_extmarks()
+	local render = dofile(vim.fn.getcwd() .. "/lua/marimo/render.lua")
+	local bufnr = vim.api.nvim_create_buf(false, true)
+	vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, {
+		"# + {marimo}",
+		"first = 1",
+		"",
+		"# +",
+		"second = 2",
+	})
+
+	local cells = {
+		{
+			id = "cell-1",
+			projection_range = { start_line = 1, end_line = 2 },
+			runtime = {
+				output = { mimetype = "text/plain", data = "first output" },
+				console = {},
+			},
+		},
+		{
+			id = "cell-2",
+			projection_range = { start_line = 4, end_line = 5 },
+			runtime = {
+				output = { mimetype = "text/plain", data = "second output" },
+				console = {},
+			},
+		},
+	}
+
+	render.render(bufnr, cells)
+
+	local initial = vim.api.nvim_buf_get_extmarks(bufnr, -1, 0, -1, {})
+	local initial_by_row = {}
+	for _, mark in ipairs(initial) do
+		initial_by_row[mark[2]] = mark[1]
+	end
+	assert_truthy(initial_by_row[1] ~= nil, "expected extmark for first cell")
+	assert_truthy(initial_by_row[4] ~= nil, "expected extmark for second cell")
+
+	cells[1].runtime.output.data = "updated first output"
+	render.render(bufnr, cells, { changed_ids = { "cell-1" } })
+
+	local updated = vim.api.nvim_buf_get_extmarks(bufnr, -1, 0, -1, {})
+	local updated_by_row = {}
+	for _, mark in ipairs(updated) do
+		updated_by_row[mark[2]] = mark[1]
+	end
+	assert_truthy(updated_by_row[1] ~= nil, "expected updated extmark for first cell")
+	assert_truthy(updated_by_row[4] ~= nil, "expected extmark for second cell after partial render")
+	assert_truthy(updated_by_row[1] ~= initial_by_row[1], "expected changed cell extmark to be replaced")
+	assert_eq(updated_by_row[4], initial_by_row[4], "expected unrelated cell extmark to remain unchanged")
+end
+
 local function test_write_does_not_block_while_runtime_is_running()
 	local path = make_path("nonblocking_write.py")
 	write_file(path, "# + {marimo}\n\nimport time\n\n# +\n\ntime.sleep(2)\nx = 1\nx")
@@ -1217,6 +1271,7 @@ local tests = {
 	test_marimo_output_renders_images_in_float,
 	test_jump_next_cell_appends_new_cell_and_enters_insert_mode,
 	test_runtime_outputs_render_below_cells,
+	test_partial_runtime_render_keeps_unrelated_extmarks,
 	test_runtime_image_outputs_use_snacks_image,
 	test_stringified_image_bundle_outputs_use_snacks_image,
 	test_console_mimebundle_outputs_render_as_images,

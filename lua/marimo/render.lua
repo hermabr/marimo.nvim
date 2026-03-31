@@ -4,15 +4,21 @@ local namespace = vim.api.nvim_create_namespace("marimo.nvim.cells")
 local output = dofile(vim.fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":h") .. "/output.lua")
 local images = dofile(vim.fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":h") .. "/images.lua")
 
-local image_state = {}
+local render_state = {}
 
-local function close_image_placements(bufnr)
-	local entry = image_state[bufnr]
+local function state_for(bufnr)
+	render_state[bufnr] = render_state[bufnr] or {
+		extmarks = {},
+		images = {},
+	}
+	return render_state[bufnr]
+end
+
+local function close_image_placements(entry)
 	if not entry then
 		return
 	end
 	images.close_placements(entry)
-	image_state[bufnr] = nil
 end
 
 local function place_output_image(bufnr, line, src)
@@ -23,9 +29,7 @@ local function place_output_image(bufnr, line, src)
 	if placement == nil then
 		return false
 	end
-	image_state[bufnr] = image_state[bufnr] or { placements = {} }
-	table.insert(image_state[bufnr].placements, placement)
-	return true
+	return placement
 end
 
 local function virtual_lines(cell)
@@ -72,38 +76,90 @@ end
 
 function M.clear(bufnr)
 	vim.api.nvim_buf_clear_namespace(bufnr, namespace, 0, -1)
-	close_image_placements(bufnr)
+	local state = render_state[bufnr]
+	if not state then
+		return
+	end
+	for _, entry in pairs(state.images) do
+		close_image_placements(entry)
+	end
+	render_state[bufnr] = nil
 end
 
-function M.render(bufnr, cells)
+local function clear_cell_render(bufnr, cell_id)
+	local state = render_state[bufnr]
+	if not state or cell_id == nil then
+		return
+	end
+	local extmark_id = state.extmarks[cell_id]
+	if extmark_id ~= nil then
+		pcall(vim.api.nvim_buf_del_extmark, bufnr, namespace, extmark_id)
+		state.extmarks[cell_id] = nil
+	end
+	close_image_placements(state.images[cell_id])
+	state.images[cell_id] = nil
+end
+
+local function render_cell(bufnr, cell, line_count)
+	if type(cell) ~= "table" or cell.id == nil then
+		return
+	end
+	local state = state_for(bufnr)
+	clear_cell_render(bufnr, cell.id)
+	line_count = line_count or math.max(vim.api.nvim_buf_line_count(bufnr), 1)
+	local range = cell.projection_range or {}
+	local line = math.max((range.end_line or range.start_line or 1) - 1, 0)
+	line = math.min(line, line_count - 1)
+	local lines, image_src = virtual_lines(cell)
+	if lines == nil and image_src == nil then
+		return
+	end
+	if lines and #lines > 0 then
+		state.extmarks[cell.id] = vim.api.nvim_buf_set_extmark(bufnr, namespace, line, 0, {
+			virt_lines = lines,
+			virt_lines_above = false,
+		})
+	end
+	if image_src then
+		local image_line = math.min(line + 1, line_count)
+		local placement = place_output_image(bufnr, image_line, image_src)
+		if placement then
+			state.images[cell.id] = { placements = { placement } }
+			return
+		end
+		state.extmarks[cell.id] = vim.api.nvim_buf_set_extmark(bufnr, namespace, line, 0, {
+			virt_lines = {
+				{ { " [image/png output]", "Comment" } },
+			},
+			virt_lines_above = false,
+		})
+	end
+end
+
+function M.render(bufnr, cells, opts)
+	opts = opts or {}
+	local changed_ids = opts.changed_ids
+	if changed_ids ~= nil then
+		local line_count = math.max(vim.api.nvim_buf_line_count(bufnr), 1)
+		local cells_by_id = {}
+		for _, cell in ipairs(cells or {}) do
+			cells_by_id[cell.id] = cell
+		end
+		for _, cell_id in ipairs(changed_ids) do
+			local cell = cells_by_id[cell_id]
+			if cell ~= nil then
+				render_cell(bufnr, cell, line_count)
+			else
+				clear_cell_render(bufnr, cell_id)
+			end
+		end
+		return
+	end
+
 	M.clear(bufnr)
 	local line_count = math.max(vim.api.nvim_buf_line_count(bufnr), 1)
 	for _, cell in ipairs(cells or {}) do
-		local range = cell.projection_range or {}
-		local line = math.max((range.end_line or range.start_line or 1) - 1, 0)
-		line = math.min(line, line_count - 1)
-		local lines, image_src = virtual_lines(cell)
-		if lines == nil and image_src == nil then
-			goto continue
-		end
-		if lines and #lines > 0 then
-			vim.api.nvim_buf_set_extmark(bufnr, namespace, line, 0, {
-				virt_lines = lines,
-				virt_lines_above = false,
-			})
-		end
-		if image_src then
-			local image_line = math.min(line + 1, line_count)
-			if not place_output_image(bufnr, image_line, image_src) then
-				vim.api.nvim_buf_set_extmark(bufnr, namespace, line, 0, {
-					virt_lines = {
-						{ { " [image/png output]", "Comment" } },
-					},
-					virt_lines_above = false,
-				})
-			end
-		end
-		::continue::
+		render_cell(bufnr, cell, line_count)
 	end
 end
 
