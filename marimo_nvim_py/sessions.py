@@ -884,9 +884,9 @@ class Worker:
                 continue
             if cell_id in graph.cells:
                 ancestors = cast(set[str], graph.ancestors(cast(CellId_t, cell_id)))
-                should_include_all = self._runtime_needs_execution(runtime_cells.get(cell_id)) or any(
-                    ancestor_id in pending_changed for ancestor_id in ancestors
-                )
+                # A requested cell may need execution because it was just re-enabled
+                # or newly added, but that alone does not make fresh ancestors stale.
+                should_include_all = any(ancestor_id in pending_changed for ancestor_id in ancestors)
                 for ancestor_id in ancestors:
                     if should_include_all or self._runtime_needs_execution(runtime_cells.get(ancestor_id)):
                         closure.add(ancestor_id)

@@ -540,6 +540,76 @@ def test_run_cells_reruns_stale_ancestors_after_sync_projection(tmp_path: Path) 
     worker.shutdown({})
 
 
+def test_run_cells_does_not_rerun_fresh_ancestors_after_reenabling_cell(tmp_path: Path) -> None:
+    worker = Worker()
+    path = tmp_path / "runtime_reenable_leaf.py"
+    initial = worker.open_session(
+        {
+            "path": str(path),
+            "content": (
+                "# + {marimo}\n\n"
+                "counts = {'parent': 0, 'leaf': 0}\n\n"
+                "def bump(key):\n"
+                "    counts[key] += 1\n"
+                "    return counts[key]\n\n"
+                "# +\n\n"
+                "parent = bump('parent')\nparent\n\n"
+                "# +\n\n"
+                "leaf = parent + bump('leaf')\nleaf"
+            ),
+            "input_kind": "projected",
+            "project_root": str(tmp_path),
+            "runtime_kind": "uv_project",
+        }
+    )
+    leaf_id = initial["cells"][2]["id"]
+
+    bootstrapped = worker.run_cells({"session_id": initial["session_id"], "cell_ids": [leaf_id]})
+    assert_text_output(bootstrapped["cells"][1]["runtime"], "1")
+    assert_text_output(bootstrapped["cells"][2]["runtime"], "2")
+
+    disabled = worker.sync_projection(
+        {
+            "session_id": initial["session_id"],
+            "content": (
+                "# + {marimo}\n\n"
+                "counts = {'parent': 0, 'leaf': 0}\n\n"
+                "def bump(key):\n"
+                "    counts[key] += 1\n"
+                "    return counts[key]\n\n"
+                "# +\n\n"
+                "parent = bump('parent')\nparent\n\n"
+                "# + {marimo_disabled}\n\n"
+                "leaf = parent + bump('leaf')\nleaf"
+            ),
+        }
+    )
+    assert disabled["cells"][2]["options"] == {"disabled": True}
+
+    reenabled = worker.sync_projection(
+        {
+            "session_id": initial["session_id"],
+            "content": (
+                "# + {marimo}\n\n"
+                "counts = {'parent': 0, 'leaf': 0}\n\n"
+                "def bump(key):\n"
+                "    counts[key] += 1\n"
+                "    return counts[key]\n\n"
+                "# +\n\n"
+                "parent = bump('parent')\nparent\n\n"
+                "# +\n\n"
+                "leaf = parent + bump('leaf')\nleaf"
+            ),
+        }
+    )
+    reenabled_leaf_id = reenabled["cells"][2]["id"]
+
+    rerun = worker.run_cells({"session_id": initial["session_id"], "cell_ids": [reenabled_leaf_id]})
+    assert_text_output(rerun["cells"][1]["runtime"], "1")
+    assert_text_output(rerun["cells"][2]["runtime"], "3")
+    worker.shutdown({})
+
+
 def test_sync_and_run_updates_descendant_outputs(tmp_path: Path) -> None:
     worker = Worker()
     path = tmp_path / "reactive.py"
