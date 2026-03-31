@@ -47,6 +47,8 @@ your normal Neovim config.
   ` [m` jumps to the previous cell and `]m` jumps to the next cell.
 - Adds a buffer-local disabled toggle for the current cell:
   `<leader>md` toggles `marimo_disabled` on the current projected cell.
+- Adds buffer-local execution keymaps:
+  `<leader>mr` runs the current cell and `<leader>mR` runs all cells.
 - Automatically creates a new trailing `# +` cell when jumping past the last
   cell.
 
@@ -54,6 +56,8 @@ You can also use:
 
 - `:MarimoCellPrev`
 - `:MarimoCellNext`
+- `:MarimoRunCell`
+- `:MarimoRunAll`
 - `:MarimoOutput`
 - `:MarimoFormat`
 
@@ -64,6 +68,8 @@ require("marimo").setup({
   keymaps = {
     prev_cell = "[m",
     next_cell = "]m",
+    run_cell = "<leader>mr",
+    run_all_cells = "<leader>mR",
     toggle_disabled = "<leader>md",
     show_output = "<leader>mo",
   },

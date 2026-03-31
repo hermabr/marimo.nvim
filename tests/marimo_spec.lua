@@ -635,6 +635,29 @@ local function test_toggle_disabled_keymap_updates_marker_and_runtime_status()
 	end, "timed out waiting for enabled marker")
 end
 
+local function test_run_keymap_callbacks_execute_current_and_all_cells()
+	local path = make_path("run_keymaps.py")
+	write_file(path, "# + {marimo}\n\nx = 1\nx\n\n# +\n\ny = x + 1\ny")
+	edit(path)
+
+	vim.cmd("Marimo on")
+
+	local run_cell_map = vim.fn.maparg("<leader>mr", "n", false, true)
+	assert_truthy(type(run_cell_map.callback) == "function", "expected <leader>mr callback")
+	vim.api.nvim_buf_set_lines(0, 2, 3, false, { "x = 9" })
+	vim.api.nvim_win_set_cursor(0, { 3, 0 })
+	run_cell_map.callback()
+	wait_for_match(" 9")
+	local current_lines = table.concat(rendered_lines(), "\n")
+	assert_matches(current_lines, " 9")
+	assert_truthy(not current_lines:match(" 10"), "expected second cell to remain unchanged when running current cell")
+
+	local run_all_map = vim.fn.maparg("<leader>mR", "n", false, true)
+	assert_truthy(type(run_all_map.callback) == "function", "expected <leader>mR callback")
+	run_all_map.callback()
+	wait_for_match(" 10")
+end
+
 local function find_floating_window()
 	for _, winid in ipairs(vim.api.nvim_list_wins()) do
 		local config = vim.api.nvim_win_get_config(winid)
@@ -1187,6 +1210,7 @@ local tests = {
 	test_navigation_commands_jump_between_cells,
 	test_navigation_keymap_callbacks_work,
 	test_toggle_disabled_keymap_updates_marker_and_runtime_status,
+	test_run_keymap_callbacks_execute_current_and_all_cells,
 	test_output_keymap_opens_scrollable_float,
 	test_marimo_output_command_opens_current_cell_output,
 	test_marimo_output_preserves_relative_numbers_and_wraps_lines,
