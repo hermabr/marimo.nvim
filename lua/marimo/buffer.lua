@@ -84,8 +84,10 @@ end
 local function merge_runtime_cells(bufnr, runtime_cells)
 	local cells = vim.b[bufnr].marimo_cells or {}
 	local by_id = vim.b[bufnr].marimo_runtime_cells or {}
+	local changed_ids = {}
 	for cell_id, runtime in pairs(runtime_cells or {}) do
 		by_id[cell_id] = runtime
+		table.insert(changed_ids, cell_id)
 	end
 	vim.b[bufnr].marimo_runtime_cells = by_id
 	for _, cell in ipairs(cells) do
@@ -93,7 +95,9 @@ local function merge_runtime_cells(bufnr, runtime_cells)
 			cell.runtime = by_id[cell.id]
 		end
 	end
-	render.render(bufnr, cells)
+	if #changed_ids > 0 then
+		render.render(bufnr, cells, { changed_ids = changed_ids })
+	end
 	output_window.refresh(bufnr)
 	util.request_redraw()
 end
