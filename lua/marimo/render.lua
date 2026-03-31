@@ -30,19 +30,38 @@ end
 
 local function virtual_lines(cell)
 	local runtime = cell.runtime or {}
+	local display_runtime = runtime
+	local is_disabled = (cell.options or {}).disabled
+	local is_disabled_ancestor = cell.disabled_transitively or runtime.status == "disabled-transitively"
+	local status_lines = {}
+	if is_disabled then
+		table.insert(status_lines, {
+			{ " marimo disabled", "WarningMsg" },
+		})
+		display_runtime = vim.deepcopy(runtime)
+		display_runtime.stale_inputs = false
+		display_runtime.status = nil
+	elseif is_disabled_ancestor then
+		table.insert(status_lines, {
+			{ " marimo disabled (ancestor)", "WarningMsg" },
+		})
+		display_runtime = vim.deepcopy(runtime)
+		display_runtime.stale_inputs = false
+		display_runtime.status = nil
+	end
 	local output_image = images.extract_output_image(runtime.output)
 	local console_image = images.extract_console_image(runtime.console)
-	local rendered = output.runtime_lines(runtime, {
+	local rendered = output.runtime_lines(display_runtime, {
 		max_lines = 12,
 		max_line_chars = 160,
 		output_image_resolved = output_image ~= nil,
 		console_image_resolved = console_image ~= nil,
 	})
-	if #rendered == 0 and output_image == nil and console_image == nil then
+	if #rendered == 0 and #status_lines == 0 and output_image == nil and console_image == nil then
 		return nil, nil
 	end
 
-	local lines = {}
+	local lines = vim.deepcopy(status_lines)
 	for _, line in ipairs(rendered) do
 		table.insert(lines, {
 			{ " " .. line.text, line.highlight },

@@ -76,6 +76,8 @@ local function parse_options_text(text)
 		if item ~= "" then
 			if item == "marimo" then
 				opts.marimo = true
+			elseif item == "marimo_disabled" then
+				opts.disabled = true
 			else
 				local eq = item:find("=", 1, true)
 				if not eq then
@@ -106,10 +108,6 @@ local function render_scalar(value)
 end
 
 local function render_options(opts)
-	if vim.tbl_isempty(opts) then
-		return ""
-	end
-
 	local keys = vim.tbl_keys(opts)
 	table.sort(keys)
 
@@ -117,10 +115,17 @@ local function render_options(opts)
 	if opts.marimo then
 		table.insert(parts, "marimo")
 	end
+	if opts.disabled then
+		table.insert(parts, "marimo_disabled")
+	end
 	for _, key in ipairs(keys) do
-		if key ~= "marimo" then
+		if key ~= "marimo" and key ~= "disabled" then
 			table.insert(parts, string.format("%s=%s", key, render_scalar(opts[key])))
 		end
+	end
+
+	if #parts == 0 then
+		return ""
 	end
 
 	return " {" .. table.concat(parts, ",") .. "}"
@@ -340,6 +345,14 @@ function M.render_projected_buffer_lines(cells)
 	end
 
 	return projected
+end
+
+function M.parse_options_text(text)
+	return parse_options_text(text)
+end
+
+function M.render_options(opts)
+	return render_options(opts)
 end
 
 return M

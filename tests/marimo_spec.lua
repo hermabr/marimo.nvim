@@ -606,6 +606,35 @@ end
 local rendered_lines
 local wait_for_match
 
+local function test_toggle_disabled_keymap_updates_marker_and_runtime_status()
+	local path = make_path("toggle_disabled_keymap.py")
+	write_file(path, "# + {marimo}\n\nx = 1\nx\n\n# +\n\ny = x + 1\ny")
+	edit(path)
+
+	vim.cmd("Marimo on")
+	vim.api.nvim_win_set_cursor(0, { 3, 0 })
+
+	local toggle_map = vim.fn.maparg("<leader>md", "n", false, true)
+	assert_truthy(type(toggle_map.callback) == "function", "expected <leader>md callback")
+	toggle_map.callback()
+
+	wait_for_truthy(function()
+		return vim.api.nvim_buf_get_lines(0, 0, 1, false)[1] == "# + {marimo,marimo_disabled}"
+	end, "timed out waiting for disabled marker")
+	wait_for_match("marimo disabled")
+	wait_for_match("marimo disabled %(ancestor%)")
+
+	local lines = table.concat(rendered_lines(), "\n")
+	assert_matches(lines, "marimo disabled")
+	assert_matches(lines, "marimo disabled %(ancestor%)")
+	assert_truthy(not lines:match("marimo stale"), "expected disabled cells to suppress stale label")
+
+	toggle_map.callback()
+	wait_for_truthy(function()
+		return vim.api.nvim_buf_get_lines(0, 0, 1, false)[1] == "# + {marimo}"
+	end, "timed out waiting for enabled marker")
+end
+
 local function find_floating_window()
 	for _, winid in ipairs(vim.api.nvim_list_wins()) do
 		local config = vim.api.nvim_win_get_config(winid)
@@ -1157,6 +1186,7 @@ local tests = {
 	test_marimo_format_command_normalizes_projected_layout,
 	test_navigation_commands_jump_between_cells,
 	test_navigation_keymap_callbacks_work,
+	test_toggle_disabled_keymap_updates_marker_and_runtime_status,
 	test_output_keymap_opens_scrollable_float,
 	test_marimo_output_command_opens_current_cell_output,
 	test_marimo_output_preserves_relative_numbers_and_wraps_lines,

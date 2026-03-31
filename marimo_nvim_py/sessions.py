@@ -167,6 +167,38 @@ def _cell_config(cell: dict[str, Any]) -> CellConfig:
     return CellConfig.from_dict(cell.get("options", {}), warn=False)
 
 
+def _cell_disabled_states(cells: list[dict[str, Any]]) -> dict[str, bool]:
+    graph = DirectedGraph()
+    try:
+        for cell in cells:
+            compiled = compile_cell(cell["code"], cell_id=cell["id"])
+            compiled.configure(_cell_config(cell))
+            graph.register_cell(cell["id"], compiled)
+    except Exception:  # noqa: BLE001
+        return {cell["id"]: False for cell in cells}
+
+    disabled_by_ancestor: dict[str, bool] = {}
+    for cell in cells:
+        disabled = graph.is_disabled(cell["id"])
+        disabled_by_ancestor[cell["id"]] = bool(disabled and not cell.get("options", {}).get("disabled"))
+    return disabled_by_ancestor
+
+
+def _cell_disabled_map(cells: list[dict[str, Any]]) -> dict[str, bool]:
+    graph = DirectedGraph()
+    try:
+        for cell in cells:
+            compiled = compile_cell(cell["code"], cell_id=cell["id"])
+            compiled.configure(_cell_config(cell))
+            graph.register_cell(cell["id"], compiled)
+    except Exception:  # noqa: BLE001
+        return {
+            cell["id"]: bool(cell.get("options", {}).get("disabled"))
+            for cell in cells
+        }
+    return {cell["id"]: graph.is_disabled(cell["id"]) for cell in cells}
+
+
 def _collect_assigned_names(node: ast.AST) -> set[str]:
     names: set[str] = set()
 
@@ -318,6 +350,7 @@ class Worker:
                     }
                 )
         projected_lines, spans = render_projected_lines(cells)
+        disabled_by_ancestor = _cell_disabled_states(cells)
         out_cells: list[dict[str, Any]] = []
         for idx, cell in enumerate(cells):
             projection_range = (
@@ -338,6 +371,7 @@ class Worker:
                     "options": cell.get("options", {}),
                     "index": idx,
                     "editor_status": cell.get("editor_status", "clean"),
+                    "disabled_transitively": disabled_by_ancestor.get(cell["id"], False),
                     "projection_range": projection_range,
                     "canonical_range": canonical_range,
                 }
@@ -831,14 +865,23 @@ class Worker:
         try:
             graph = DirectedGraph()
             for cell in session.cells:
-                graph.register_cell(cell["id"], compile_cell(cell["code"], cell_id=cell["id"]))
+                compiled = compile_cell(cell["code"], cell_id=cell["id"])
+                compiled.configure(_cell_config(cell))
+                graph.register_cell(cell["id"], compiled)
         except Exception:  # noqa: BLE001
-            return [cell["id"] for cell in session.cells if cell["id"] in requested]
+            return [
+                cell["id"]
+                for cell in session.cells
+                if cell["id"] in requested and not cell.get("options", {}).get("disabled")
+            ]
 
         pending_changed = set(session.pending_changed_cell_ids or [])
         runtime_cells = session.runtime_cells or {}
         closure = set(requested)
         for cell_id in requested:
+            if graph.is_disabled(cast(CellId_t, cell_id)):
+                closure.discard(cell_id)
+                continue
             if cell_id in graph.cells:
                 ancestors = cast(set[str], graph.ancestors(cast(CellId_t, cell_id)))
                 should_include_all = self._runtime_needs_execution(runtime_cells.get(cell_id)) or any(
@@ -896,6 +939,8 @@ class Worker:
             changed_ids = [cell["id"] for cell in cells]
         canonical_source, projection_map, cells = self._build_notebook(session.path, session.header, session.app_options, cells)
         projected_lines = render_projected_lines(cells)[0]
+        disabled_map = _cell_disabled_map(cells)
+        run_ids = [cell_id for cell_id in changed_ids if not disabled_map.get(cell_id, False)]
         session.cells = cells
         session.canonical_source = canonical_source
         session.projected_lines = projected_lines
@@ -906,7 +951,7 @@ class Worker:
         self.sync_runtime_graph(
             {
                 "session_id": session.session_id,
-                "run_ids": changed_ids,
+                "run_ids": run_ids,
                 "delete_ids": deleted_ids,
                 "_request_id": params.get("_request_id"),
             }

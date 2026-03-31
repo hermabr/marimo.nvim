@@ -506,6 +506,9 @@ local function status_highlight(runtime, output_highlight)
 	if runtime.status == "running" or runtime.status == "queued" then
 		return "Identifier"
 	end
+	if runtime.status == "disabled-transitively" then
+		return "WarningMsg"
+	end
 	if runtime.stale_inputs then
 		return "WarningMsg"
 	end
@@ -516,6 +519,9 @@ local function status_label(runtime)
 	if runtime.stale_inputs then
 		return "marimo stale"
 	end
+	if runtime.status == "disabled-transitively" then
+		return "marimo disabled (ancestor)"
+	end
 	return "marimo " .. (as_string(runtime.status) or "idle")
 end
 
@@ -523,7 +529,7 @@ local function show_status_line(runtime)
 	if runtime.stale_inputs then
 		return true
 	end
-	return runtime.status == "running" or runtime.status == "queued"
+	return runtime.status == "running" or runtime.status == "queued" or runtime.status == "disabled-transitively"
 end
 
 function M.runtime_sections(runtime, opts)
