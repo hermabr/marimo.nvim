@@ -83,9 +83,11 @@ class BridgeSession:
     completed_runs: int = 0
     function_results: dict[str, FunctionCallResultNotification] = field(default_factory=dict)
     lock: threading.RLock = field(default_factory=threading.RLock)
+    command_lock: threading.RLock = field(default_factory=threading.RLock)
     stop_event: threading.Event = field(default_factory=threading.Event)
     stream_thread: threading.Thread | None = None
     active_request_id: int | None = None
+    cancelled_request_ids: set[int] = field(default_factory=set)
 
     def update_snapshot(self, snapshot: NotebookSnapshot) -> None:
         self.snapshot = snapshot
@@ -165,6 +167,21 @@ class BridgeSession:
         self.session_view.add_control_request(command)
         _route_control_request(self.kernel, command)
 
+    def cancel_request(self, request_id: int | None) -> None:
+        if request_id is None:
+            return
+        with self.lock:
+            self.cancelled_request_ids.add(request_id)
+
+    def _consume_cancelled_request(self, request_id: int | None) -> bool:
+        if request_id is None:
+            return False
+        with self.lock:
+            if request_id not in self.cancelled_request_ids:
+                return False
+            self.cancelled_request_ids.discard(request_id)
+            return True
+
     def _drain_notifications(self, timeout: float) -> None:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -194,48 +211,47 @@ class BridgeSession:
         raise TimeoutError("timed out waiting for marimo runtime to finish")
 
     def sync_notebook(self, *, run_ids: list[str], delete_ids: list[str], request_id: int | None) -> None:
-        self.ensure_started()
-        assert self.file_manager is not None
-        assert self.file_manager.app is not None
-        previous_completed_runs = self.completed_runs
-        self.file_manager.app.with_data(
-            cell_ids=[cast(CellId_t, cell.id) for cell in self.snapshot.cells],
-            codes=[cell.code for cell in self.snapshot.cells],
-            names=[cell.name for cell in self.snapshot.cells],
-            configs=[_cell_config(cell) for cell in self.snapshot.cells],
-        )
-        command = SyncGraphCommand(
-            cells={cast(CellId_t, cell.id): cell.code for cell in self.snapshot.cells},
-            run_ids=[cast(CellId_t, cell_id) for cell_id in run_ids],
-            delete_ids=[cast(CellId_t, cell_id) for cell_id in delete_ids],
-        )
-        with self.lock:
-            self.active_request_id = request_id
-        self._send_command(command)
+        with self.command_lock:
+            self.ensure_started()
+            if self._consume_cancelled_request(request_id):
+                return
+            assert self.file_manager is not None
+            assert self.file_manager.app is not None
+            self.file_manager.app.with_data(
+                cell_ids=[cast(CellId_t, cell.id) for cell in self.snapshot.cells],
+                codes=[cell.code for cell in self.snapshot.cells],
+                names=[cell.name for cell in self.snapshot.cells],
+                configs=[_cell_config(cell) for cell in self.snapshot.cells],
+            )
+            command = SyncGraphCommand(
+                cells={cast(CellId_t, cell.id): cell.code for cell in self.snapshot.cells},
+                run_ids=[cast(CellId_t, cell_id) for cell_id in run_ids],
+                delete_ids=[cast(CellId_t, cell_id) for cell_id in delete_ids],
+            )
+            with self.lock:
+                self.active_request_id = request_id
+            self._send_command(command)
         if run_ids:
-            self._wait_for_completion(previous_completed_runs)
+            self._drain_notifications(timeout=0.05)
         else:
             self._drain_notifications(timeout=0.1)
-        with self.lock:
-            self.active_request_id = None
 
     def run_cells(self, *, cell_ids: list[str], codes: list[str], request_id: int | None) -> None:
-        self.ensure_started()
-        previous_completed_runs = self.completed_runs
-        command = ExecuteCellsCommand(
-            cell_ids=[cast(CellId_t, cell_id) for cell_id in cell_ids],
-            codes=codes,
-        )
-        with self.lock:
-            self.active_request_id = request_id
-        self._send_command(command)
-        self._wait_for_completion(previous_completed_runs)
-        with self.lock:
-            self.active_request_id = None
+        with self.command_lock:
+            self.ensure_started()
+            if self._consume_cancelled_request(request_id):
+                return
+            command = ExecuteCellsCommand(
+                cell_ids=[cast(CellId_t, cell_id) for cell_id in cell_ids],
+                codes=codes,
+            )
+            with self.lock:
+                self.active_request_id = request_id
+            self._send_command(command)
+        self._drain_notifications(timeout=0.05)
 
     def set_ui_element_value(self, *, object_ids: list[str], values: list[Any], request_id: int | None) -> None:
         self.ensure_started()
-        previous_completed_runs = self.completed_runs
         command = UpdateUIElementCommand(
             object_ids=[cast(UIElementId, object_id) for object_id in object_ids],
             values=values,
@@ -243,9 +259,7 @@ class BridgeSession:
         with self.lock:
             self.active_request_id = request_id
         self._send_command(command)
-        self._wait_for_completion(previous_completed_runs)
-        with self.lock:
-            self.active_request_id = None
+        self._drain_notifications(timeout=0.05)
 
     def set_model_value(
         self,
@@ -256,7 +270,6 @@ class BridgeSession:
         request_id: int | None,
     ) -> None:
         self.ensure_started()
-        previous_completed_runs = self.completed_runs
         command = ModelCommand(
             model_id=cast(WidgetModelId, model_id),
             message=_model_message_from_dict(message),
@@ -265,9 +278,7 @@ class BridgeSession:
         with self.lock:
             self.active_request_id = request_id
         self._send_command(command)
-        self._wait_for_completion(previous_completed_runs)
-        with self.lock:
-            self.active_request_id = None
+        self._drain_notifications(timeout=0.05)
 
     def invoke_function(
         self,
@@ -314,11 +325,12 @@ class BridgeSession:
             self.session_view.add_stdin(text)
 
     def interrupt(self, request_id: int | None) -> None:
-        self.ensure_started()
-        assert self.kernel is not None
-        with self.lock:
-            self.active_request_id = request_id
-        self.kernel.interrupt()
+        with self.command_lock:
+            self.ensure_started()
+            assert self.kernel is not None
+            with self.lock:
+                self.active_request_id = request_id
+            self.kernel.interrupt()
         self._drain_notifications(timeout=0.1)
         with self.lock:
             self.active_request_id = None

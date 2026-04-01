@@ -4,18 +4,56 @@ local namespace = vim.api.nvim_create_namespace("marimo.nvim.cells")
 local output = dofile(vim.fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":h") .. "/output.lua")
 local images = dofile(vim.fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":h") .. "/images.lua")
 
-local image_state = {}
+local render_state = {}
 
-local function close_image_placements(bufnr)
-	local entry = image_state[bufnr]
+local function normalize_bufnr(bufnr)
+	if bufnr == nil or bufnr == 0 then
+		return vim.api.nvim_get_current_buf()
+	end
+	return bufnr
+end
+
+local function state_for(bufnr)
+	bufnr = normalize_bufnr(bufnr)
+	render_state[bufnr] = render_state[bufnr] or {
+		extmarks_by_cell = {},
+		placements_by_cell = {},
+	}
+	return render_state[bufnr]
+end
+
+local function clear_cell(bufnr, cell_id)
+	local entry = render_state[bufnr]
+	if not entry or not cell_id then
+		return
+	end
+	local extmark_id = entry.extmarks_by_cell[cell_id]
+	if extmark_id then
+		pcall(vim.api.nvim_buf_del_extmark, bufnr, namespace, extmark_id)
+		entry.extmarks_by_cell[cell_id] = nil
+	end
+	local placement_entry = entry.placements_by_cell[cell_id]
+	if placement_entry then
+		images.close_placements(placement_entry)
+		entry.placements_by_cell[cell_id] = nil
+	end
+end
+
+local function close_all_cells(bufnr)
+	local entry = render_state[bufnr]
 	if not entry then
 		return
 	end
-	images.close_placements(entry)
-	image_state[bufnr] = nil
+	for cell_id in pairs(entry.placements_by_cell) do
+		clear_cell(bufnr, cell_id)
+	end
+	for cell_id in pairs(entry.extmarks_by_cell) do
+		clear_cell(bufnr, cell_id)
+	end
+	render_state[bufnr] = nil
 end
 
-local function place_output_image(bufnr, line, src)
+local function place_output_image(bufnr, cell_id, line, src)
 	local placement = images.place_image(bufnr, line, src, {
 		max_width = 80,
 		max_height = 24,
@@ -23,8 +61,7 @@ local function place_output_image(bufnr, line, src)
 	if placement == nil then
 		return false
 	end
-	image_state[bufnr] = image_state[bufnr] or { placements = {} }
-	table.insert(image_state[bufnr].placements, placement)
+	state_for(bufnr).placements_by_cell[cell_id] = { placements = { placement } }
 	return true
 end
 
@@ -70,40 +107,84 @@ local function virtual_lines(cell)
 	return lines, output_image or console_image
 end
 
-function M.clear(bufnr)
-	vim.api.nvim_buf_clear_namespace(bufnr, namespace, 0, -1)
-	close_image_placements(bufnr)
-end
-
-function M.render(bufnr, cells)
-	M.clear(bufnr)
+local function render_cell(bufnr, cell)
+	clear_cell(bufnr, cell.id)
 	local line_count = math.max(vim.api.nvim_buf_line_count(bufnr), 1)
-	for _, cell in ipairs(cells or {}) do
-		local range = cell.projection_range or {}
-		local line = math.max((range.end_line or range.start_line or 1) - 1, 0)
-		line = math.min(line, line_count - 1)
-		local lines, image_src = virtual_lines(cell)
-		if lines == nil and image_src == nil then
-			goto continue
-		end
-		if lines and #lines > 0 then
-			vim.api.nvim_buf_set_extmark(bufnr, namespace, line, 0, {
-				virt_lines = lines,
-				virt_lines_above = false,
+	local range = cell.projection_range or {}
+	local line = math.max((range.end_line or range.start_line or 1) - 1, 0)
+	line = math.min(line, line_count - 1)
+	local lines, image_src = virtual_lines(cell)
+	local extmark_lines = lines and vim.deepcopy(lines) or {}
+	if image_src then
+		local image_line = math.min(line + 1, line_count)
+		if not place_output_image(bufnr, cell.id, image_line, image_src) then
+			table.insert(extmark_lines, {
+				{ " [image/png output]", "Comment" },
 			})
 		end
-		if image_src then
-			local image_line = math.min(line + 1, line_count)
-			if not place_output_image(bufnr, image_line, image_src) then
-				vim.api.nvim_buf_set_extmark(bufnr, namespace, line, 0, {
-					virt_lines = {
-						{ { " [image/png output]", "Comment" } },
-					},
-					virt_lines_above = false,
-				})
+	end
+	if #extmark_lines == 0 then
+		return
+	end
+	state_for(bufnr).extmarks_by_cell[cell.id] = vim.api.nvim_buf_set_extmark(bufnr, namespace, line, 0, {
+		virt_lines = extmark_lines,
+		virt_lines_above = false,
+	})
+end
+
+function M.clear(bufnr)
+	bufnr = normalize_bufnr(bufnr)
+	vim.api.nvim_buf_clear_namespace(bufnr, namespace, 0, -1)
+	close_all_cells(bufnr)
+end
+
+function M.render(bufnr, cells, opts)
+	bufnr = normalize_bufnr(bufnr)
+	opts = opts or {}
+	local entry = state_for(bufnr)
+	local cells_by_id = {}
+	local present_lookup = {}
+	local target_ids = {}
+	for _, cell in ipairs(cells or {}) do
+		cells_by_id[cell.id] = cell
+		present_lookup[cell.id] = true
+		if not opts.changed_ids then
+			table.insert(target_ids, cell.id)
+		end
+	end
+	if opts.changed_ids then
+		for _, cell_id in ipairs(opts.changed_ids) do
+			table.insert(target_ids, cell_id)
+		end
+	end
+	local removed_lookup = {}
+	for cell_id in pairs(entry.extmarks_by_cell) do
+		if not present_lookup[cell_id] then
+			removed_lookup[cell_id] = true
+		end
+	end
+	for cell_id in pairs(entry.placements_by_cell) do
+		if not present_lookup[cell_id] then
+			removed_lookup[cell_id] = true
+		end
+	end
+	for _, cell_id in ipairs(opts.deleted_ids or {}) do
+		removed_lookup[cell_id] = true
+	end
+	for cell_id in pairs(removed_lookup) do
+		clear_cell(bufnr, cell_id)
+	end
+	local rendered_lookup = {}
+	for _, cell_id in ipairs(target_ids) do
+		if not rendered_lookup[cell_id] then
+			rendered_lookup[cell_id] = true
+			local cell = cells_by_id[cell_id]
+			if cell then
+				render_cell(bufnr, cell)
+			else
+				clear_cell(bufnr, cell_id)
 			end
 		end
-		::continue::
 	end
 end
 

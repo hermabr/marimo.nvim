@@ -50,13 +50,13 @@ end
 
 function M.apply_operation(runtime_by_id, operation)
 	if type(operation) ~= "table" then
-		return runtime_by_id, false
+		return runtime_by_id, false, nil
 	end
 	local op = operation.op
 	if op == "cell-op" then
 		local cell_id = operation.cell_id
 		if not cell_id then
-			return runtime_by_id, false
+			return runtime_by_id, false, nil
 		end
 		local previous = runtime_by_id[cell_id] or default_runtime()
 		local next_runtime = vim.deepcopy(previous)
@@ -86,18 +86,23 @@ function M.apply_operation(runtime_by_id, operation)
 		vim.list_extend(combined_console, as_list(operation.console))
 		next_runtime.console = merge_consecutive_console(combined_console)
 		runtime_by_id[cell_id] = next_runtime
-		return runtime_by_id, true
+		return runtime_by_id, true, { cell_id }
 	end
 	if op == "interrupted" then
-		for _, runtime in pairs(runtime_by_id) do
+		local changed_ids = {}
+		for cell_id, runtime in pairs(runtime_by_id) do
 			if runtime.status == "queued" or runtime.status == "running" then
 				runtime.status = "idle"
 				runtime._running_timestamp = nil
+				table.insert(changed_ids, cell_id)
 			end
 		end
-		return runtime_by_id, true
+		if #changed_ids == 0 then
+			return runtime_by_id, false, nil
+		end
+		return runtime_by_id, true, changed_ids
 	end
-	return runtime_by_id, false
+	return runtime_by_id, false, nil
 end
 
 function M.attach_runtime(cells, runtime_by_id)

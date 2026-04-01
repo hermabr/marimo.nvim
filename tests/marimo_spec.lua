@@ -51,6 +51,9 @@ local function assert_matches(text, pattern, message)
 	end
 end
 
+local rendered_lines
+local wait_for_match
+
 local temp_root = vim.fn.tempname()
 vim.fn.mkdir(temp_root, "p")
 
@@ -603,8 +606,35 @@ local function test_navigation_keymap_callbacks_work()
 	assert_eq(vim.api.nvim_win_get_cursor(0)[1], 7)
 end
 
-local rendered_lines
-local wait_for_match
+local function test_run_current_cell_keymap_callback_works()
+	local path = make_path("run_current_keymap.py")
+	write_file(path, "# + {marimo}\n\nx = 1\nx")
+	edit(path)
+
+	vim.cmd("Marimo on")
+	vim.api.nvim_buf_set_lines(0, 2, 3, false, { "x = 9" })
+	vim.api.nvim_win_set_cursor(0, { 3, 0 })
+
+	local run_map = vim.fn.maparg("<leader>mr", "n", false, true)
+	assert_truthy(type(run_map.callback) == "function", "expected <leader>mr callback")
+	run_map.callback()
+
+	wait_for_match(" 9")
+end
+
+local function test_run_all_cells_keymap_callback_works()
+	local path = make_path("run_all_keymap.py")
+	write_file(path, "# + {marimo}\n\nx = 1\nx\n\n# +\n\ny = x + 1\ny")
+	edit(path)
+
+	vim.cmd("Marimo on")
+	local run_map = vim.fn.maparg("<leader>mR", "n", false, true)
+	assert_truthy(type(run_map.callback) == "function", "expected <leader>mR callback")
+	run_map.callback()
+
+	wait_for_match(" 1")
+	wait_for_match(" 2")
+end
 
 local function test_toggle_disabled_keymap_updates_marker_and_runtime_status()
 	local path = make_path("toggle_disabled_keymap.py")
@@ -816,11 +846,65 @@ rendered_lines = function()
 	return lines
 end
 
+local function render_extmarks()
+	local marks = vim.api.nvim_buf_get_extmarks(0, -1, 0, -1, { details = true })
+	table.sort(marks, function(left, right)
+		if left[2] == right[2] then
+			return left[1] < right[1]
+		end
+		return left[2] < right[2]
+	end)
+	return marks
+end
+
 wait_for_match = function(pattern, timeout)
 	local matched = vim.wait(timeout or 5000, function()
 		return table.concat(rendered_lines(), "\n"):match(pattern) ~= nil
 	end, 20)
 	assert_truthy(matched, "timed out waiting for pattern: " .. pattern)
+end
+
+local function test_render_partial_updates_preserve_unrelated_extmarks()
+	local render = dofile(vim.fn.getcwd() .. "/lua/marimo/render.lua")
+	local path = make_path("render_partial.py")
+	write_file(path, "# + {marimo}\n\nx = 1\n\n# +\n\ny = 2")
+	edit(path)
+	render.clear(0)
+
+	local cells = {
+		{
+			id = "cell-1",
+			projection_range = { start_line = 1, end_line = 3 },
+			runtime = {
+				output = { mimetype = "text/plain", data = "1" },
+				console = {},
+			},
+		},
+		{
+			id = "cell-2",
+			projection_range = { start_line = 5, end_line = 7 },
+			runtime = {
+				output = { mimetype = "text/plain", data = "2" },
+				console = {},
+			},
+		},
+	}
+
+	render.render(0, cells)
+	local initial_marks = render_extmarks()
+	assert_eq(#initial_marks, 2)
+	local first_mark = initial_marks[1][1]
+	local second_mark = initial_marks[2][1]
+
+	cells[1].runtime.output.data = "7"
+	render.render(0, cells, {
+		changed_ids = { "cell-1" },
+	})
+
+	local updated_marks = render_extmarks()
+	assert_eq(#updated_marks, 2)
+	assert_truthy(updated_marks[1][1] ~= first_mark, "expected changed cell extmark to be replaced")
+	assert_eq(updated_marks[2][1], second_mark)
 end
 
 local function test_runtime_outputs_render_below_cells()
@@ -853,6 +937,32 @@ local function test_write_does_not_block_while_runtime_is_running()
 		local content = read_file(path)
 		return content:match("import marimo") ~= nil and content:match("@app%.cell") ~= nil
 	end, "timed out waiting for async write")
+end
+
+local function test_editing_running_cell_and_autosync_do_not_block()
+	local path = make_path("nonblocking_edit.py")
+	write_file(path, "# + {marimo}\n\nimport time\ntime.sleep(2.0)\nx = 1\nx")
+	edit(path)
+
+	vim.cmd("Marimo on")
+	vim.cmd("MarimoRunAll")
+	wait_for_truthy(function()
+		local lines = table.concat(rendered_lines(), "\n")
+		return lines:match("marimo queued") ~= nil or lines:match("marimo running") ~= nil
+	end, "timed out waiting for running placeholder")
+
+	local started = vim.uv.hrtime()
+	vim.api.nvim_buf_set_lines(0, 4, 5, false, { "x = 7" })
+	vim.api.nvim_exec_autocmds("TextChanged", { buffer = 0, modeline = false })
+	vim.api.nvim_exec_autocmds("InsertLeave", { buffer = 0, modeline = false })
+	local elapsed_ms = (vim.uv.hrtime() - started) / 1000000
+	assert_truthy(elapsed_ms < 1000, "expected edit autosync to return without waiting for the running cell")
+
+	wait_for_match(" 7", 7000)
+	wait_for_truthy(function()
+		local lines = table.concat(rendered_lines(), "\n")
+		return not lines:match("marimo queued") and not lines:match("marimo running")
+	end, "timed out waiting for edited cell run to settle", 7000)
 end
 
 local function test_run_all_shows_per_cell_running_placeholders()
@@ -915,7 +1025,6 @@ local function test_sync_buffer_updates_reactive_outputs()
 	wait_for_match(" 2")
 	vim.api.nvim_buf_set_lines(0, 2, 3, false, { "x = 3" })
 	require("marimo").sync_buffer(0)
-	vim.cmd("MarimoRunAll")
 	wait_for_match(" 3")
 	wait_for_match(" 4")
 
@@ -1190,18 +1299,22 @@ local tests = {
 	test_marimo_format_command_normalizes_projected_layout,
 	test_navigation_commands_jump_between_cells,
 	test_navigation_keymap_callbacks_work,
+	test_run_current_cell_keymap_callback_works,
+	test_run_all_cells_keymap_callback_works,
 	test_toggle_disabled_keymap_updates_marker_and_runtime_status,
 	test_output_keymap_opens_scrollable_float,
 	test_marimo_output_command_opens_current_cell_output,
 	test_marimo_output_preserves_relative_numbers_and_wraps_lines,
 	test_marimo_output_renders_images_in_float,
 	test_jump_next_cell_appends_new_cell_and_enters_insert_mode,
+	test_render_partial_updates_preserve_unrelated_extmarks,
 	test_runtime_outputs_render_below_cells,
 	test_runtime_image_outputs_use_snacks_image,
 	test_stringified_image_bundle_outputs_use_snacks_image,
 	test_console_mimebundle_outputs_render_as_images,
 	test_marshaled_json_outputs_render_text_and_images,
 	test_write_does_not_block_while_runtime_is_running,
+	test_editing_running_cell_and_autosync_do_not_block,
 	test_run_all_shows_per_cell_running_placeholders,
 	test_new_cell_autorun_streams_runtime_updates,
 	test_opening_without_running_does_not_render_idle_placeholders,

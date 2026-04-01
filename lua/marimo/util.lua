@@ -2,6 +2,9 @@ local M = {}
 local next_local_id = 0
 
 function M.notify(msg, level)
+	if vim.g.marimo_shutting_down == true or tonumber(vim.v.exiting) ~= 0 then
+		return
+	end
 	vim.notify("marimo.nvim: " .. msg, level or vim.log.levels.INFO)
 end
 

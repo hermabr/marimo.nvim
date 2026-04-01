@@ -4,6 +4,7 @@ import html
 import io
 import re
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
@@ -59,6 +60,15 @@ def output_text(operation: dict[str, Any]) -> str | None:
     if output.get("mimetype") == "text/html":
         return html.unescape(re.sub(r"<[^>]+>", "", str(output.get("data"))))
     return None
+
+
+def wait_for_truthy(predicate: Any, timeout: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(0.01)
+    raise AssertionError("timed out waiting for worker event")
 
 
 def test_load_raw_notebook_returns_normalized_snapshot(tmp_path: Path) -> None:
@@ -147,9 +157,9 @@ def test_worker_run_cells_forwards_raw_operation_events(tmp_path: Path) -> None:
     )
 
     assert result == {"session_id": snapshot["session_id"], "submitted": True}
+    wait_for_truthy(lambda: any(event.get("operation", {}).get("op") == "completed-run" for event in events))
     assert any(event.get("event") == "operation" for event in events)
     assert any(event.get("request_id") == 7 for event in events)
-    assert any(event.get("operation", {}).get("op") == "completed-run" for event in events)
 
     cell_events = [
         event["operation"]
@@ -176,6 +186,61 @@ def test_worker_sync_notebook_accepts_runtime_session_creation(tmp_path: Path) -
     )
 
     assert result == {"session_id": snapshot["session_id"], "synced": True}
+    wait_for_truthy(
+        lambda: any(
+            output_text(event["operation"]) == "2"
+            for event in events
+            if event.get("operation", {}).get("op") == "cell-op"
+        )
+    )
     assert any(event.get("request_id") == 11 for event in events)
-    assert any(output_text(event["operation"]) == "2" for event in events if event.get("operation", {}).get("op") == "cell-op")
+    worker.shutdown({})
+
+
+def test_worker_run_cells_returns_before_slow_cell_finishes(tmp_path: Path) -> None:
+    events: list[dict[str, Any]] = []
+    worker = Worker(event_sink=events.append)
+    snapshot = build_snapshot(tmp_path / "slow.py", "import time\ntime.sleep(2.0)\n1")
+
+    worker.ensure_session({"snapshot": snapshot})
+    started = time.monotonic()
+    result = worker.run_cells(
+        {
+            "session_id": snapshot["session_id"],
+            "cell_ids": ["cell-1"],
+            "codes": ["import time\ntime.sleep(2.0)\n1"],
+            "_request_id": 13,
+        }
+    )
+    elapsed = time.monotonic() - started
+
+    assert result == {"session_id": snapshot["session_id"], "submitted": True}
+    assert elapsed < 1.0
+    wait_for_truthy(lambda: any(event.get("operation", {}).get("op") == "completed-run" for event in events))
+    worker.shutdown({})
+
+
+def test_worker_run_cells_accepts_snapshot_for_session_creation(tmp_path: Path) -> None:
+    events: list[dict[str, Any]] = []
+    worker = Worker(event_sink=events.append)
+    snapshot = build_snapshot(tmp_path / "run_with_snapshot.py")
+
+    result = worker.run_cells(
+        {
+            "snapshot": snapshot,
+            "cell_ids": ["cell-1"],
+            "codes": ["x = 1\nx"],
+            "_request_id": 17,
+        }
+    )
+
+    assert result == {"session_id": snapshot["session_id"], "submitted": True}
+    wait_for_truthy(
+        lambda: any(
+            output_text(event["operation"]) == "1"
+            for event in events
+            if event.get("operation", {}).get("op") == "cell-op"
+        )
+    )
+    assert any(event.get("request_id") == 17 for event in events)
     worker.shutdown({})

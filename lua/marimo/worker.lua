@@ -4,6 +4,8 @@ local M = {}
 local workers = {}
 local next_request_id = 0
 
+vim.g.marimo_shutting_down = false
+
 local function find_project_root(path)
 	local absolute = vim.fn.fnamemodify(path, ":p")
 	local dirpath = vim.fn.fnamemodify(absolute, ":h")
@@ -58,6 +60,7 @@ local function ensure_worker(path)
 		pending = {},
 		stdout_buffer = "",
 		runtime_kind = spec.runtime_kind,
+		shutting_down = false,
 	}
 
 	local function dispatch_response(decoded)
@@ -67,7 +70,9 @@ local function ensure_worker(path)
 		end
 		pending.response = decoded
 		if pending.callback then
-			worker.pending[decoded.id] = nil
+			if not (pending.event_callback and decoded.ok) then
+				worker.pending[decoded.id] = nil
+			end
 			vim.schedule(function()
 				if decoded.ok then
 					pending.callback(decoded.result, nil)
@@ -137,7 +142,7 @@ local function ensure_worker(path)
 		end,
 		on_exit = function()
 			for request_id, pending in pairs(worker.pending) do
-				if pending.callback then
+				if pending.callback and not worker.shutting_down then
 					vim.schedule(function()
 						pending.callback(nil, last_error or "marimo worker exited")
 					end)
@@ -220,6 +225,15 @@ function M.request_async(path, method, params, callback, event_callback)
 	return request_id
 end
 
+function M.finish_request(path, request_id)
+	local project_root = find_project_root(path)
+	local worker = workers[project_root]
+	if not worker then
+		return
+	end
+	worker.pending[request_id] = nil
+end
+
 function M.request_isolated_async(path, method, params, callback)
 	local spec = launch_spec(path)
 	local stdout_chunks = {}
@@ -289,7 +303,9 @@ function M.request_isolated_async(path, method, params, callback)
 end
 
 function M.shutdown_all()
+	vim.g.marimo_shutting_down = true
 	for project_root, worker in pairs(workers) do
+		worker.shutting_down = true
 		pcall(vim.fn.chansend, worker.job_id, vim.json.encode({ id = -1, method = "shutdown", params = {} }) .. "\n")
 		pcall(vim.fn.jobstop, worker.job_id)
 		workers[project_root] = nil
