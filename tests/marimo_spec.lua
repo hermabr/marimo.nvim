@@ -1062,6 +1062,51 @@ local function test_editing_running_cell_and_autosync_do_not_block()
 	end, "timed out waiting for edited cell run to settle", 7000)
 end
 
+local function test_edits_interrupt_run_all_before_lower_cells_finish()
+	local path = make_path("interrupts_run_all.py")
+	local counter_path = make_path("interrupts_run_all_counter.txt")
+	write_file(
+		path,
+		string.format(
+			"# + {marimo}\n\nimport time\ndelay = 2.0\nx = 1\ntime.sleep(delay)\nx\n\n# +\n\ny = x + 1\ny\n\n# +\n\nfrom pathlib import Path\ncounter_path = Path(%q)\ncounter = int(counter_path.read_text()) if counter_path.exists() else 0\ncounter_path.write_text(str(counter + 1))\ncounter + 1",
+			counter_path
+		)
+	)
+	edit(path)
+
+	vim.cmd("Marimo on")
+	vim.cmd("MarimoRunAll")
+	wait_for_truthy(function()
+		local lines = table.concat(rendered_lines(), "\n")
+		return lines:match("marimo queued") ~= nil or lines:match("marimo running") ~= nil
+	end, "timed out waiting for run-all placeholder")
+
+	vim.api.nvim_buf_set_lines(0, 3, 5, false, {
+		"delay = 0.0",
+		"x = 7",
+	})
+	vim.api.nvim_exec_autocmds("TextChanged", { buffer = 0, modeline = false })
+	vim.api.nvim_exec_autocmds("InsertLeave", { buffer = 0, modeline = false })
+
+	wait_for_truthy(function()
+		local cells = vim.b.marimo_cells or {}
+		local second_runtime = cells[2] and cells[2].runtime or {}
+		return second_runtime.stale_inputs == true or second_runtime.status == "queued"
+	end, "timed out waiting for dependent cell to be marked stale or queued during run-all", 1000)
+
+	wait_for_match(" 7", 7000)
+	wait_for_match(" 8", 7000)
+	wait_for_truthy(function()
+		local lines = table.concat(rendered_lines(), "\n")
+		return not lines:match("marimo queued") and not lines:match("marimo running")
+	end, "timed out waiting for run-all interruption rerun to settle", 7000)
+
+	assert_truthy(
+		vim.fn.filereadable(counter_path) == 0,
+		"expected lower unrelated run-all work to be cancelled after edit"
+	)
+end
+
 local function test_run_all_shows_per_cell_running_placeholders()
 	local path = make_path("runtime_pending.py")
 	write_file(path, "# + {marimo}\n\nx = 1\nx\n\n# +\n\nimport time\ntime.sleep(2.0)\ny = x + 1\ny")
@@ -1628,6 +1673,7 @@ local tests = {
 	test_marshaled_json_outputs_render_text_and_images,
 	test_write_does_not_block_while_runtime_is_running,
 	test_editing_running_cell_and_autosync_do_not_block,
+	test_edits_interrupt_run_all_before_lower_cells_finish,
 	test_run_all_shows_per_cell_running_placeholders,
 	test_new_cell_autorun_streams_runtime_updates,
 	test_opening_without_running_does_not_render_idle_placeholders,

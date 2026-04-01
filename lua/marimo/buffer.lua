@@ -1014,18 +1014,14 @@ function M.run_all_cells(bufnr)
 		util.notify("failed to sync marimo notebook: " .. err, vim.log.levels.ERROR)
 		return
 	end
-	if runtime_started(bufnr) and (#changed_ids > 0 or #deleted_ids > 0) then
-		queue_invalidating_runtime_sync(bufnr, synced_snapshot, {}, deleted_ids, {
-			preempt_active = true,
-		})
-	end
 	local cell_ids = {}
-	local codes = {}
-	for _, cell in ipairs(vim.b[bufnr].marimo_cells or {}) do
+	for _, cell in ipairs(synced_snapshot.cells or {}) do
 		table.insert(cell_ids, cell.id)
-		table.insert(codes, cell.code)
 	end
-	queue_runtime_run(bufnr, synced_snapshot, cell_ids, codes)
+	queue_invalidating_runtime_sync(bufnr, synced_snapshot, cell_ids, deleted_ids, {
+		preempt_active = runtime_started(bufnr) and (#changed_ids > 0 or #deleted_ids > 0),
+		schedule_stale_followup = runtime_started(bufnr) and (#changed_ids > 0 or #deleted_ids > 0),
+	})
 end
 
 function M.run_current_cell(bufnr)
