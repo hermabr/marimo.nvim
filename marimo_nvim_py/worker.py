@@ -6,6 +6,7 @@ import sys
 import threading
 from typing import Any
 
+from marimo_nvim_py.codec import load_raw_notebook, serialize_notebook
 from marimo_nvim_py.sessions import Worker
 
 
@@ -29,11 +30,12 @@ def main() -> int:
 
     worker = Worker(event_sink=emit_event)
     methods = {
+        "load_raw_notebook": lambda params: load_raw_notebook(params["path"], params["content"]),
+        "serialize_notebook": lambda params: serialize_notebook(params["path"], params["snapshot"]),
         "open_session": worker.open_session,
         "sync_projection": worker.sync_projection,
         "sync_and_run": worker.sync_and_run,
-        "write_session": worker.write_session,
-        "write_projection": worker.write_projection,
+        "write_notebook": worker.write_notebook,
         "reload_from_disk": worker.reload_from_disk,
         "ensure_runtime_session": worker.ensure_runtime_session,
         "sync_runtime_graph": worker.sync_runtime_graph,

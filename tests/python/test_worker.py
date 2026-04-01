@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
+from marimo_nvim_py.codec import load_raw_notebook, serialize_notebook
 from marimo_nvim_py.projected import (
     dedupe_empty_cells,
     drop_empty_cells,
@@ -69,6 +70,144 @@ def console_text(runtime: dict[str, object]) -> list[str]:
         else:
             lines.extend(str(entry["data"]).splitlines())
     return lines
+
+
+def reconcile_ids(previous: list[dict[str, Any]] | None, parsed_cells: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not previous:
+        return [{**cell, "id": f"cell-{idx}", "editor_status": "clean"} for idx, cell in enumerate(parsed_cells, start=1)]
+    previous_by_key: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
+    for old in previous:
+        key = (old["name"], json.dumps(old.get("options", {}), sort_keys=True), old["code"])
+        previous_by_key.setdefault(key, []).append(old)
+    matched_previous_ids: set[str] = set()
+    provisional: list[dict[str, Any]] = []
+    unmatched_new_indices: list[int] = []
+    for idx, cell in enumerate(parsed_cells):
+        key = (cell["name"], json.dumps(cell.get("options", {}), sort_keys=True), cell["code"])
+        matched = None
+        queue = previous_by_key.get(key, [])
+        while queue:
+            candidate = queue.pop(0)
+            if candidate["id"] not in matched_previous_ids:
+                matched = candidate
+                break
+        if matched is None:
+            provisional.append({**cell})
+            unmatched_new_indices.append(idx)
+        else:
+            matched_previous_ids.add(matched["id"])
+            provisional.append(
+                {
+                    **cell,
+                    "id": matched["id"],
+                    "editor_status": (
+                        "clean"
+                        if matched["code"] == cell["code"]
+                        and matched.get("options", {}) == cell.get("options", {})
+                        and matched["name"] == cell["name"]
+                        else "edited"
+                    ),
+                }
+            )
+
+    remaining_previous = [cell for cell in previous if cell["id"] not in matched_previous_ids]
+    prev_pos = 0
+    for idx in unmatched_new_indices:
+        cell = provisional[idx]
+        matched = None
+        for search_idx in range(prev_pos, len(remaining_previous)):
+            candidate = remaining_previous[search_idx]
+            if candidate["name"] == cell["name"] and candidate.get("options", {}) == cell.get("options", {}):
+                matched = candidate
+                prev_pos = search_idx + 1
+                break
+        provisional[idx] = {
+            **cell,
+            "id": matched["id"] if matched is not None else f"cell-new-{idx}",
+            "editor_status": "edited",
+        }
+    return provisional
+
+
+def build_payload(path: Path | str, cells: list[dict[str, Any]], *, header: str | None = None, app_options: dict[str, Any] | None = None) -> dict[str, Any]:
+    string_path = str(path)
+    snapshot = {
+        "session_id": string_path,
+        "path": string_path,
+        "header": header,
+        "app_options": app_options or {},
+        "cells": cells,
+    }
+    serialized = serialize_notebook(string_path, snapshot)
+    projected_lines, spans = render_projected_lines(cells)
+    enriched_cells = []
+    for idx, cell in enumerate(cells):
+        enriched_cells.append(
+            {
+                **cell,
+                "index": idx,
+                "projection_range": spans[idx],
+                "canonical_range": serialized["canonical_ranges"][idx],
+            }
+        )
+    return {
+        "session_id": string_path,
+        "path": string_path,
+        "header": header,
+        "app_options": app_options or {},
+        "cells": enriched_cells,
+        "projected_lines": projected_lines,
+        "canonical_source": serialized["canonical_source"],
+        "projection_map": {
+            "cells": [
+                {
+                    "id": cell["id"],
+                    "name": cell["name"],
+                    "projection_range": cell["projection_range"],
+                    "canonical_range": cell["canonical_range"],
+                }
+                for cell in enriched_cells
+            ]
+        },
+    }
+
+
+def projected_payload(path: Path | str, content: str, previous: dict[str, Any] | None = None) -> dict[str, Any]:
+    parsed_cells = drop_empty_cells(dedupe_empty_cells(parse_projected_cells(content.splitlines())))
+    reconciled = reconcile_ids(previous["cells"] if previous else None, parsed_cells)
+    return build_payload(path, reconciled)
+
+
+def open_projected(worker: Worker, path: Path, content: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    payload = projected_payload(path, content)
+    runtime = worker.open_session(
+        {
+            "path": str(path),
+            "payload": payload,
+            "project_root": str(path.parent),
+            "runtime_kind": "uv_project",
+        }
+    )
+    return payload, runtime
+
+
+def open_raw(worker: Worker, path: Path, content: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    payload = load_raw_notebook(str(path), content)
+    payload = build_payload(path, cast(list[dict[str, Any]], payload["cells"]), header=cast(str | None, payload["header"]), app_options=cast(dict[str, Any], payload["app_options"]))
+    runtime = worker.open_session(
+        {
+            "path": str(path),
+            "payload": payload,
+            "project_root": str(path.parent),
+            "runtime_kind": "uv_project",
+        }
+    )
+    return payload, runtime
+
+
+def result_cells(payload: dict[str, Any], runtime_payload: dict[str, Any]) -> list[dict[str, Any]]:
+    runtime_cells = cast(dict[str, dict[str, Any]], runtime_payload["runtime_cells"])
+    return [{**cell, "runtime": runtime_cells.get(cell["id"], {})} for cell in cast(list[dict[str, Any]], payload["cells"])]
 
 
 MARIMO_TABLE_HTML = (
@@ -151,23 +290,15 @@ def test_parse_projected_cells_supports_marimo_disabled_marker() -> None:
 
 
 def test_render_options_omits_empty_braces_for_disabled_false() -> None:
-    worker = Worker()
-    path = "notebook.py"
-    canonical_source, projection_map, cells = worker._build_notebook(
-        path,
-        None,
-        {},
-        [
-            {
-                "id": "cell-1",
-                "name": "_",
-                "code": "x = 1",
-                "options": {"disabled": False},
-                "editor_status": "clean",
-            }
-        ],
-    )
-    del canonical_source, projection_map
+    cells = [
+        {
+            "id": "cell-1",
+            "name": "_",
+            "code": "x = 1",
+            "options": {"disabled": False},
+            "editor_status": "clean",
+        }
+    ]
     assert render_projected_lines(cells)[0][0] == "# + {marimo}"
 
 
@@ -223,20 +354,11 @@ def test_open_session_from_raw_notebook(tmp_path: Path) -> None:
     worker = Worker()
     path = tmp_path / "notebook.py"
     path.write_text(RAW_NOTEBOOK, encoding="utf-8")
-    result = worker.open_session(
-        {
-            "path": str(path),
-            "content": RAW_NOTEBOOK,
-            "input_kind": "raw_marimo",
-            "project_root": str(tmp_path),
-            "runtime_kind": "uv_project",
-        }
-    )
-    assert result["session_id"] == str(path)
-    assert result["runtime_kind"] == "uv_project"
-    assert result["projected_lines"][0] == "# + {marimo}"
-    assert "@app.cell" in result["canonical_source"]
-    assert result["projection_map"]["cells"][0]["canonical_range"]["start_line"] > 0
+    payload, runtime = open_raw(worker, path, RAW_NOTEBOOK)
+    assert runtime["session_id"] == str(path)
+    assert payload["projected_lines"][0] == "# + {marimo}"
+    assert "@app.cell" in payload["canonical_source"]
+    assert payload["projection_map"]["cells"][0]["canonical_range"]["start_line"] > 0
 
 
 def test_open_session_from_raw_notebook_renders_disabled_marker(tmp_path: Path) -> None:
@@ -257,57 +379,29 @@ def _():
 if __name__ == "__main__":
     app.run()
 """
-    result = worker.open_session(
-        {
-            "path": str(path),
-            "content": raw,
-            "input_kind": "raw_marimo",
-            "project_root": str(tmp_path),
-            "runtime_kind": "uv_project",
-        }
-    )
-    assert result["projected_lines"][0] == "# + {marimo,marimo_disabled}"
-    assert result["cells"][0]["options"] == {"disabled": True}
+    payload, _ = open_raw(worker, path, raw)
+    assert payload["projected_lines"][0] == "# + {marimo,marimo_disabled}"
+    assert payload["cells"][0]["options"] == {"disabled": True}
 
 
 def test_sync_projection_preserves_stable_ids(tmp_path: Path) -> None:
     worker = Worker()
     path = tmp_path / "notebook.py"
-    initial = worker.open_session(
-        {
-            "path": str(path),
-            "content": "# + {marimo}\n\nx = 1\nx",
-            "input_kind": "projected",
-            "project_root": str(tmp_path),
-            "runtime_kind": "uv_project",
-        }
-    )
-    updated = worker.sync_projection(
-        {
-            "session_id": initial["session_id"],
-            "content": "# + {marimo}\n\nx = 2\nx",
-        }
-    )
-    assert initial["cells"][0]["id"] == updated["cells"][0]["id"]
-    assert updated["cells"][0]["editor_status"] == "edited"
+    initial_payload, _ = open_projected(worker, path, "# + {marimo}\n\nx = 1\nx")
+    updated_payload = projected_payload(path, "# + {marimo}\n\nx = 2\nx", initial_payload)
+    worker.sync_projection({"session_id": initial_payload["session_id"], "payload": updated_payload})
+    assert initial_payload["cells"][0]["id"] == updated_payload["cells"][0]["id"]
+    assert updated_payload["cells"][0]["editor_status"] == "edited"
 
 
-def test_write_session_writes_canonical_marimo_source(tmp_path: Path) -> None:
+def test_write_notebook_writes_canonical_marimo_source(tmp_path: Path) -> None:
     worker = Worker()
     path = tmp_path / "projected.py"
-    result = worker.open_session(
+    payload, _ = open_projected(worker, path, "# + {marimo}\n\nx = 1\nx")
+    worker.write_notebook(
         {
             "path": str(path),
-            "content": "# + {marimo}\n\nx = 1\nx",
-            "input_kind": "projected",
-            "project_root": str(tmp_path),
-            "runtime_kind": "uv_project",
-        }
-    )
-    worker.write_session(
-        {
-            "session_id": result["session_id"],
-            "content": "# + {marimo}\n\nx = 1\nx",
+            "canonical_source": payload["canonical_source"],
         }
     )
     written = path.read_text(encoding="utf-8")
@@ -315,36 +409,20 @@ def test_write_session_writes_canonical_marimo_source(tmp_path: Path) -> None:
     assert "@app.cell" in written
 
 
-def test_write_projection_writes_canonical_marimo_source(tmp_path: Path) -> None:
-    worker = Worker()
+def test_serialize_notebook_writes_canonical_marimo_source(tmp_path: Path) -> None:
     path = tmp_path / "projected_async.py"
-    result = worker.write_projection(
-        {
-            "path": str(path),
-            "content": "# + {marimo}\n\nx = 1\nx",
-            "header": None,
-            "app_options": {},
-        }
-    )
+    payload = projected_payload(path, "# + {marimo}\n\nx = 1\nx")
+    Path(path).write_text(payload["canonical_source"], encoding="utf-8")
     written = path.read_text(encoding="utf-8")
     assert "import marimo" in written
     assert "@app.cell" in written
-    assert result["last_saved_source_hash"]
 
 
 def test_reload_from_disk_closes_previous_runtime_session(tmp_path: Path) -> None:
     worker = Worker()
     path = tmp_path / "reload_me.py"
-    initial = worker.open_session(
-        {
-            "path": str(path),
-            "content": "# + {marimo}\n\nx = 1\nx",
-            "input_kind": "projected",
-            "project_root": str(tmp_path),
-            "runtime_kind": "uv_project",
-        }
-    )
-    old_session = worker.sessions[initial["session_id"]]
+    initial_payload, _ = open_projected(worker, path, "# + {marimo}\n\nx = 1\nx")
+    old_session = worker.sessions[initial_payload["session_id"]]
     closed = {"value": False}
 
     def close() -> None:
@@ -354,10 +432,10 @@ def test_reload_from_disk_closes_previous_runtime_session(tmp_path: Path) -> Non
     old_session.runtime_session = old_runtime_session
 
     path.write_text(RAW_NOTEBOOK, encoding="utf-8")
-    reloaded = worker.reload_from_disk({"session_id": initial["session_id"]})
+    reloaded = worker.reload_from_disk({"session_id": initial_payload["session_id"]})
 
-    new_session = worker.sessions[initial["session_id"]]
-    assert reloaded["session_id"] == initial["session_id"]
+    new_session = worker.sessions[initial_payload["session_id"]]
+    assert reloaded["session_id"] == initial_payload["session_id"]
     assert new_session is not old_session
     assert new_session.runtime_session is not None
     assert new_session.runtime_session is not old_runtime_session
@@ -388,64 +466,35 @@ def _():
 if __name__ == "__main__":
     app.run()
 """
-    result = worker.open_session(
-        {
-            "path": str(path),
-            "content": raw,
-            "input_kind": "raw_marimo",
-            "project_root": str(tmp_path),
-            "runtime_kind": "uv_project",
-        }
-    )
-    assert len(result["cells"]) == 1
-    assert result["cells"][0]["code"] == "x = 1"
-    assert result["canonical_source"].count("@app.cell") == 1
+    payload, _ = open_raw(worker, path, raw)
+    assert len(payload["cells"]) == 1
+    assert payload["cells"][0]["code"] == "x = 1"
+    assert payload["canonical_source"].count("@app.cell") == 1
 
 
 def test_sync_projection_preserves_existing_ids_when_inserting_first_cell(tmp_path: Path) -> None:
     worker = Worker()
     path = tmp_path / "insert_before.py"
-    initial = worker.open_session(
-        {
-            "path": str(path),
-            "content": "# + {marimo}\n\na = 1\n\n# +\n\nb = 2",
-            "input_kind": "projected",
-            "project_root": str(tmp_path),
-            "runtime_kind": "uv_project",
-        }
-    )
-    old_a_id = initial["cells"][0]["id"]
-    old_b_id = initial["cells"][1]["id"]
+    initial_payload, _ = open_projected(worker, path, "# + {marimo}\n\na = 1\n\n# +\n\nb = 2")
+    old_a_id = initial_payload["cells"][0]["id"]
+    old_b_id = initial_payload["cells"][1]["id"]
+    updated_payload = projected_payload(path, "# + {marimo}\n\nx = 0\n\n# +\n\na = 1\n\n# +\n\nb = 2", initial_payload)
+    worker.sync_projection({"session_id": initial_payload["session_id"], "payload": updated_payload})
 
-    updated = worker.sync_projection(
-        {
-            "session_id": initial["session_id"],
-            "content": "# + {marimo}\n\nx = 0\n\n# +\n\na = 1\n\n# +\n\nb = 2",
-        }
-    )
-
-    assert len(updated["cells"]) == 3
-    assert updated["cells"][0]["id"] not in {old_a_id, old_b_id}
-    assert updated["cells"][1]["id"] == old_a_id
-    assert updated["cells"][2]["id"] == old_b_id
-    assert updated["cells"][1]["editor_status"] == "clean"
-    assert updated["cells"][2]["editor_status"] == "clean"
+    assert len(updated_payload["cells"]) == 3
+    assert updated_payload["cells"][0]["id"] not in {old_a_id, old_b_id}
+    assert updated_payload["cells"][1]["id"] == old_a_id
+    assert updated_payload["cells"][2]["id"] == old_b_id
+    assert updated_payload["cells"][1]["editor_status"] == "clean"
+    assert updated_payload["cells"][2]["editor_status"] == "clean"
 
 
 def test_run_cells_populates_runtime_output(tmp_path: Path) -> None:
     worker = Worker()
     path = tmp_path / "runtime_output.py"
-    initial = worker.open_session(
-        {
-            "path": str(path),
-            "content": "# + {marimo}\n\nx = 1\nx",
-            "input_kind": "projected",
-            "project_root": str(tmp_path),
-            "runtime_kind": "uv_project",
-        }
-    )
-    result = worker.run_cells({"session_id": initial["session_id"], "cell_ids": [initial["cells"][0]["id"]]})
-    runtime = result["cells"][0]["runtime"]
+    payload, _ = open_projected(worker, path, "# + {marimo}\n\nx = 1\nx")
+    result = worker.run_cells({"session_id": payload["session_id"], "cell_ids": [payload["cells"][0]["id"]]})
+    runtime = result_cells(payload, result)[0]["runtime"]
     assert runtime["status"] == "idle"
     assert_text_output(runtime, "1")
     worker.shutdown({})
@@ -454,19 +503,12 @@ def test_run_cells_populates_runtime_output(tmp_path: Path) -> None:
 def test_run_cells_only_runs_selected_cell_and_its_ancestors(tmp_path: Path) -> None:
     worker = Worker()
     path = tmp_path / "runtime_ancestors.py"
-    initial = worker.open_session(
-        {
-            "path": str(path),
-            "content": "# + {marimo}\n\na = 1\na\n\n# +\n\nb = a + 1\nb\n\n# +\n\nc = 9\nc",
-            "input_kind": "projected",
-            "project_root": str(tmp_path),
-            "runtime_kind": "uv_project",
-        }
-    )
-    result = worker.run_cells({"session_id": initial["session_id"], "cell_ids": [initial["cells"][1]["id"]]})
-    first_runtime = result["cells"][0]["runtime"]
-    second_runtime = result["cells"][1]["runtime"]
-    third_runtime = result["cells"][2]["runtime"]
+    payload, _ = open_projected(worker, path, "# + {marimo}\n\na = 1\na\n\n# +\n\nb = a + 1\nb\n\n# +\n\nc = 9\nc")
+    result = worker.run_cells({"session_id": payload["session_id"], "cell_ids": [payload["cells"][1]["id"]]})
+    cells = result_cells(payload, result)
+    first_runtime = cells[0]["runtime"]
+    second_runtime = cells[1]["runtime"]
+    third_runtime = cells[2]["runtime"]
     assert_text_output(first_runtime, "1")
     assert_text_output(second_runtime, "2")
     assert_no_output(third_runtime)
@@ -476,149 +518,89 @@ def test_run_cells_only_runs_selected_cell_and_its_ancestors(tmp_path: Path) -> 
 def test_run_cells_does_not_rerun_non_stale_ancestors_after_bootstrap(tmp_path: Path) -> None:
     worker = Worker()
     path = tmp_path / "runtime_ancestor_rerun.py"
-    initial = worker.open_session(
-        {
-            "path": str(path),
-            "content": (
-                "# + {marimo}\n\nimport time\n"
-                "counts = {'base': 0, 'mid': 0, 'leaf': 0}\n\n"
-                "def f(x, key):\n"
-                "    for i in range(x):\n"
-                "        print(i)\n"
-                "        time.sleep(0.01)\n"
-                "    counts[key] += 1\n"
-                "    return counts[key]\n\n"
-                "# +\n\nmid = f(2, 'mid')\nmid\n\n"
-                "# +\n\nleaf = mid + f(2, 'leaf')\nleaf"
-            ),
-            "input_kind": "projected",
-            "project_root": str(tmp_path),
-            "runtime_kind": "uv_project",
-        }
+    content = (
+        "# + {marimo}\n\nimport time\n"
+        "counts = {'base': 0, 'mid': 0, 'leaf': 0}\n\n"
+        "def f(x, key):\n"
+        "    for i in range(x):\n"
+        "        print(i)\n"
+        "        time.sleep(0.01)\n"
+        "    counts[key] += 1\n"
+        "    return counts[key]\n\n"
+        "# +\n\nmid = f(2, 'mid')\nmid\n\n"
+        "# +\n\nleaf = mid + f(2, 'leaf')\nleaf"
     )
-    leaf_id = initial["cells"][2]["id"]
+    payload, _ = open_projected(worker, path, content)
+    leaf_id = payload["cells"][2]["id"]
 
-    first = worker.run_cells({"session_id": initial["session_id"], "cell_ids": [leaf_id]})
-    assert_text_output(first["cells"][1]["runtime"], "1")
-    assert_text_output(first["cells"][2]["runtime"], "2")
+    first = result_cells(payload, worker.run_cells({"session_id": payload["session_id"], "cell_ids": [leaf_id]}))
+    assert_text_output(first[1]["runtime"], "1")
+    assert_text_output(first[2]["runtime"], "2")
 
-    second = worker.run_cells({"session_id": initial["session_id"], "cell_ids": [leaf_id]})
-    assert_text_output(second["cells"][1]["runtime"], "1")
-    assert_text_output(second["cells"][2]["runtime"], "3")
+    second = result_cells(payload, worker.run_cells({"session_id": payload["session_id"], "cell_ids": [leaf_id]}))
+    assert_text_output(second[1]["runtime"], "1")
+    assert_text_output(second[2]["runtime"], "3")
     worker.shutdown({})
 
 
 def test_run_cells_reruns_stale_ancestors_after_sync_projection(tmp_path: Path) -> None:
     worker = Worker()
     path = tmp_path / "runtime_stale_ancestors.py"
-    initial = worker.open_session(
-        {
-            "path": str(path),
-            "content": "# + {marimo}\n\nx = 1\nx\n\n# +\n\ny = x + 1\ny\n\n# +\n\nz = y + 1\nz",
-            "input_kind": "projected",
-            "project_root": str(tmp_path),
-            "runtime_kind": "uv_project",
-        }
-    )
-    leaf_id = initial["cells"][2]["id"]
+    initial_payload, _ = open_projected(worker, path, "# + {marimo}\n\nx = 1\nx\n\n# +\n\ny = x + 1\ny\n\n# +\n\nz = y + 1\nz")
+    leaf_id = initial_payload["cells"][2]["id"]
 
-    bootstrapped = worker.run_cells({"session_id": initial["session_id"], "cell_ids": [leaf_id]})
-    assert_text_output(bootstrapped["cells"][0]["runtime"], "1")
-    assert_text_output(bootstrapped["cells"][1]["runtime"], "2")
-    assert_text_output(bootstrapped["cells"][2]["runtime"], "3")
+    bootstrapped = result_cells(initial_payload, worker.run_cells({"session_id": initial_payload["session_id"], "cell_ids": [leaf_id]}))
+    assert_text_output(bootstrapped[0]["runtime"], "1")
+    assert_text_output(bootstrapped[1]["runtime"], "2")
+    assert_text_output(bootstrapped[2]["runtime"], "3")
 
-    worker.sync_projection(
-        {
-            "session_id": initial["session_id"],
-            "content": "# + {marimo}\n\nx = 7\nx\n\n# +\n\ny = x + 1\ny\n\n# +\n\nz = y + 1\nz",
-        }
-    )
-    rerun = worker.run_cells({"session_id": initial["session_id"], "cell_ids": [leaf_id]})
-    assert_text_output(rerun["cells"][0]["runtime"], "7")
-    assert_text_output(rerun["cells"][1]["runtime"], "8")
-    assert_text_output(rerun["cells"][2]["runtime"], "9")
+    updated_payload = projected_payload(path, "# + {marimo}\n\nx = 7\nx\n\n# +\n\ny = x + 1\ny\n\n# +\n\nz = y + 1\nz", initial_payload)
+    worker.sync_projection({"session_id": initial_payload["session_id"], "payload": updated_payload})
+    rerun = result_cells(updated_payload, worker.run_cells({"session_id": initial_payload["session_id"], "cell_ids": [leaf_id]}))
+    assert_text_output(rerun[0]["runtime"], "7")
+    assert_text_output(rerun[1]["runtime"], "8")
+    assert_text_output(rerun[2]["runtime"], "9")
     worker.shutdown({})
 
 
 def test_sync_and_run_updates_descendant_outputs(tmp_path: Path) -> None:
     worker = Worker()
     path = tmp_path / "reactive.py"
-    initial = worker.open_session(
-        {
-            "path": str(path),
-            "content": "# + {marimo}\n\nx = 1\nx\n\n# +\n\ny = x + 1\ny",
-            "input_kind": "projected",
-            "project_root": str(tmp_path),
-            "runtime_kind": "uv_project",
-        }
-    )
-    updated = worker.sync_and_run(
-        {
-            "session_id": initial["session_id"],
-            "content": "# + {marimo}\n\nx = 3\nx\n\n# +\n\ny = x + 1\ny",
-        }
-    )
-    assert_text_output(updated["cells"][0]["runtime"], "3")
-    assert_text_output(updated["cells"][1]["runtime"], "4")
+    initial_payload, _ = open_projected(worker, path, "# + {marimo}\n\nx = 1\nx\n\n# +\n\ny = x + 1\ny")
+    updated_payload = projected_payload(path, "# + {marimo}\n\nx = 3\nx\n\n# +\n\ny = x + 1\ny", initial_payload)
+    updated = result_cells(updated_payload, worker.sync_and_run({"session_id": initial_payload["session_id"], "payload": updated_payload}))
+    assert_text_output(updated[0]["runtime"], "3")
+    assert_text_output(updated[1]["runtime"], "4")
     worker.shutdown({})
 
 
 def test_sync_and_run_does_not_autorun_disabled_cells_or_dependents(tmp_path: Path) -> None:
     worker = Worker()
     path = tmp_path / "reactive_disabled.py"
-    initial = worker.open_session(
-        {
-            "path": str(path),
-            "content": "# + {marimo,marimo_disabled}\n\nx = 1\nx\n\n# +\n\ny = x + 1\ny",
-            "input_kind": "projected",
-            "project_root": str(tmp_path),
-            "runtime_kind": "uv_project",
-        }
-    )
-    updated = worker.sync_and_run(
-        {
-            "session_id": initial["session_id"],
-            "content": "# + {marimo,marimo_disabled}\n\nx = 3\nx\n\n# +\n\ny = x + 1\ny",
-        }
-    )
-    assert_no_output(updated["cells"][0]["runtime"])
-    assert_no_output(updated["cells"][1]["runtime"])
-    assert updated["cells"][0]["runtime"]["status"] in {None, "idle"}
-    assert updated["cells"][1]["disabled_transitively"] is True
+    initial_payload, _ = open_projected(worker, path, "# + {marimo,marimo_disabled}\n\nx = 1\nx\n\n# +\n\ny = x + 1\ny")
+    updated_payload = projected_payload(path, "# + {marimo,marimo_disabled}\n\nx = 3\nx\n\n# +\n\ny = x + 1\ny", initial_payload)
+    updated = result_cells(updated_payload, worker.sync_and_run({"session_id": initial_payload["session_id"], "payload": updated_payload}))
+    assert_no_output(updated[0]["runtime"])
+    assert_no_output(updated[1]["runtime"])
+    assert updated[0]["runtime"]["status"] in {None, "idle"}
     worker.shutdown({})
 
 
 def test_run_cells_does_not_run_disabled_cells(tmp_path: Path) -> None:
     worker = Worker()
     path = tmp_path / "runtime_disabled.py"
-    initial = worker.open_session(
-        {
-            "path": str(path),
-            "content": "# + {marimo,marimo_disabled}\n\nx = 1\nx",
-            "input_kind": "projected",
-            "project_root": str(tmp_path),
-            "runtime_kind": "uv_project",
-        }
-    )
-    result = worker.run_cells({"session_id": initial["session_id"], "cell_ids": [initial["cells"][0]["id"]]})
-    assert_no_output(result["cells"][0]["runtime"])
+    payload, _ = open_projected(worker, path, "# + {marimo,marimo_disabled}\n\nx = 1\nx")
+    result = result_cells(payload, worker.run_cells({"session_id": payload["session_id"], "cell_ids": [payload["cells"][0]["id"]]}))
+    assert_no_output(result[0]["runtime"])
     worker.shutdown({})
 
 
 def test_html_output_is_summarized(tmp_path: Path) -> None:
     worker = Worker()
     path = tmp_path / "html_output.py"
-    initial = worker.open_session(
-        {
-            "path": str(path),
-            "content": '# + {marimo}\n\nimport marimo as mo\nmo.md(\"# hello\")',
-            "input_kind": "projected",
-            "project_root": str(tmp_path),
-            "runtime_kind": "uv_project",
-        }
-    )
-    result = worker.run_cells({"session_id": initial["session_id"], "cell_ids": [initial["cells"][0]["id"]]})
-    runtime = result["cells"][0]["runtime"]
+    payload, _ = open_projected(worker, path, '# + {marimo}\n\nimport marimo as mo\nmo.md("# hello")')
+    result = result_cells(payload, worker.run_cells({"session_id": payload["session_id"], "cell_ids": [payload["cells"][0]["id"]]}))
+    runtime = result[0]["runtime"]
     output = cast(dict[str, object], runtime["output"])
     assert output["mimetype"] in {"text/plain", "text/html", "text/markdown", "application/vnd.marimo+mimebundle"}
     assert output["data"] is not None
@@ -628,17 +610,9 @@ def test_html_output_is_summarized(tmp_path: Path) -> None:
 def test_run_cells_captures_stdout_as_console_entries(tmp_path: Path) -> None:
     worker = Worker()
     path = tmp_path / "stdout_output.py"
-    initial = worker.open_session(
-        {
-            "path": str(path),
-            "content": '# + {marimo}\n\nprint("hello")\n1',
-            "input_kind": "projected",
-            "project_root": str(tmp_path),
-            "runtime_kind": "uv_project",
-        }
-    )
-    result = worker.run_cells({"session_id": initial["session_id"], "cell_ids": [initial["cells"][0]["id"]]})
-    runtime = result["cells"][0]["runtime"]
+    payload, _ = open_projected(worker, path, '# + {marimo}\n\nprint("hello")\n1')
+    result = result_cells(payload, worker.run_cells({"session_id": payload["session_id"], "cell_ids": [payload["cells"][0]["id"]]}))
+    runtime = result[0]["runtime"]
     assert_text_output(runtime, "1")
     assert console_text(runtime) == ["hello"]
     worker.shutdown({})
@@ -648,28 +622,20 @@ def test_run_cells_emits_incremental_runtime_updates(tmp_path: Path) -> None:
     events: list[dict[str, object]] = []
     worker = Worker(event_sink=events.append)
     path = tmp_path / "runtime_stream.py"
-    initial = worker.open_session(
-        {
-            "path": str(path),
-            "content": "# + {marimo}\n\nx = 1\nx\n\n# +\n\nimport time\ntime.sleep(2.0)\ny = x + 1\ny",
-            "input_kind": "projected",
-            "project_root": str(tmp_path),
-            "runtime_kind": "uv_project",
-        }
-    )
+    payload, _ = open_projected(worker, path, "# + {marimo}\n\nx = 1\nx\n\n# +\n\nimport time\ntime.sleep(2.0)\ny = x + 1\ny")
 
     result = worker.run_cells(
         {
-            "session_id": initial["session_id"],
-            "cell_ids": [cell["id"] for cell in initial["cells"]],
+            "session_id": payload["session_id"],
+            "cell_ids": [cell["id"] for cell in payload["cells"]],
             "_request_id": 42,
         }
     )
-
-    assert_text_output(result["cells"][0]["runtime"], "1")
-    assert_text_output(result["cells"][1]["runtime"], "2")
-    first_cell_id = initial["cells"][0]["id"]
-    second_cell_id = initial["cells"][1]["id"]
+    cells = result_cells(payload, result)
+    assert_text_output(cells[0]["runtime"], "1")
+    assert_text_output(cells[1]["runtime"], "2")
+    first_cell_id = payload["cells"][0]["id"]
+    second_cell_id = payload["cells"][1]["id"]
     runtime_events = [event for event in events if event.get("event") == "runtime_update"]
     assert runtime_events
     assert any(
@@ -684,37 +650,21 @@ def test_run_cells_emits_incremental_runtime_updates(tmp_path: Path) -> None:
     worker.shutdown({})
 
 
-def test_sync_and_run_emits_session_update_for_new_cells(tmp_path: Path) -> None:
+def test_sync_and_run_emits_runtime_update_for_new_cells(tmp_path: Path) -> None:
     events: list[dict[str, object]] = []
     worker = Worker(event_sink=events.append)
     path = tmp_path / "runtime_new_cell_stream.py"
-    initial = worker.open_session(
-        {
-            "path": str(path),
-            "content": "# + {marimo}\n\nx = 1\nx",
-            "input_kind": "projected",
-            "project_root": str(tmp_path),
-            "runtime_kind": "uv_project",
-        }
+    initial_payload, _ = open_projected(worker, path, "# + {marimo}\n\nx = 1\nx")
+    updated_payload = projected_payload(path, "# + {marimo}\n\nx = 1\nx\n\n# +\n\nimport time\ntime.sleep(2.0)\ny = x + 1\ny", initial_payload)
+    updated = result_cells(
+        updated_payload,
+        worker.sync_and_run({"session_id": initial_payload["session_id"], "payload": updated_payload, "_request_id": 99}),
     )
 
-    updated = worker.sync_and_run(
-        {
-            "session_id": initial["session_id"],
-            "content": "# + {marimo}\n\nx = 1\nx\n\n# +\n\nimport time\ntime.sleep(2.0)\ny = x + 1\ny",
-            "_request_id": 99,
-        }
-    )
-
-    assert len(updated["cells"]) == 2
-    session_events = [event for event in events if event.get("event") == "session_update"]
-    assert session_events
-    assert any(
-        event.get("request_id") == 99
-        and isinstance(event.get("payload"), dict)
-        and len(cast(list[dict[str, object]], cast(dict[str, object], event["payload"])["cells"])) == 2
-        for event in session_events
-    )
+    assert len(updated) == 2
+    runtime_events = [event for event in events if event.get("event") == "runtime_update"]
+    assert runtime_events
+    assert any(event.get("request_id") == 99 for event in runtime_events)
     worker.shutdown({})
 
 
@@ -740,13 +690,13 @@ def test_interrupt_is_not_queued_behind_run_request(tmp_path: Path) -> None:
         stdin.flush()
 
     try:
+        payload = projected_payload(path, "# + {marimo}\n\nimport time\ntime.sleep(2)\n1")
         send_request(
             1,
             "open_session",
             {
                 "path": str(path),
-                "content": "# + {marimo}\n\nimport time\ntime.sleep(2)\n1",
-                "input_kind": "projected",
+                "payload": payload,
                 "project_root": str(tmp_path),
                 "runtime_kind": "uv_project",
             },
@@ -755,7 +705,7 @@ def test_interrupt_is_not_queued_behind_run_request(tmp_path: Path) -> None:
         assert open_response["id"] == 1
         open_result = cast(dict[str, object], open_response["result"])
         session_id = cast(str, open_result["session_id"])
-        open_cells = cast(list[dict[str, object]], open_result["cells"])
+        open_cells = cast(list[dict[str, object]], payload["cells"])
 
         send_request(2, "run_cells", {"session_id": session_id, "cell_ids": [open_cells[0]["id"]]})
         time.sleep(0.2)
@@ -793,17 +743,9 @@ def test_run_cells_resolves_relative_paths_from_notebook_directory(tmp_path: Pat
     path = tmp_path / "relative_path.py"
     data_path = tmp_path / "value.txt"
     data_path.write_text("hello", encoding="utf-8")
-    initial = worker.open_session(
-        {
-            "path": str(path),
-            "content": '# + {marimo}\n\nfrom pathlib import Path\nPath("./value.txt").read_text()',
-            "input_kind": "projected",
-            "project_root": str(tmp_path),
-            "runtime_kind": "uv_project",
-        }
-    )
-    result = worker.run_cells({"session_id": initial["session_id"], "cell_ids": [initial["cells"][0]["id"]]})
-    assert_text_output(result["cells"][0]["runtime"], "'hello'")
+    payload, _ = open_projected(worker, path, '# + {marimo}\n\nfrom pathlib import Path\nPath("./value.txt").read_text()')
+    result = result_cells(payload, worker.run_cells({"session_id": payload["session_id"], "cell_ids": [payload["cells"][0]["id"]]}))
+    assert_text_output(result[0]["runtime"], "'hello'")
     worker.shutdown({})
 
 
@@ -811,21 +753,14 @@ def test_run_cells_attributes_stdout_to_the_emitting_cell(tmp_path: Path) -> Non
     worker = Worker()
     path = tmp_path / "stdout_attribution.py"
     (tmp_path / "value.txt").write_text("hello", encoding="utf-8")
-    initial = worker.open_session(
-        {
-            "path": str(path),
-            "content": (
-                '# + {marimo}\n\nfrom pathlib import Path\nPath("./value.txt").read_text()\n\n'
-                '# +\n\nprint("HEY")'
-            ),
-            "input_kind": "projected",
-            "project_root": str(tmp_path),
-            "runtime_kind": "uv_project",
-        }
+    payload, _ = open_projected(
+        worker,
+        path,
+        '# + {marimo}\n\nfrom pathlib import Path\nPath("./value.txt").read_text()\n\n# +\n\nprint("HEY")',
     )
-    result = worker.run_cells({"session_id": initial["session_id"], "cell_ids": [cell["id"] for cell in initial["cells"]]})
-    first_runtime = result["cells"][0]["runtime"]
-    second_runtime = result["cells"][1]["runtime"]
+    result = result_cells(payload, worker.run_cells({"session_id": payload["session_id"], "cell_ids": [cell["id"] for cell in payload["cells"]]}))
+    first_runtime = result[0]["runtime"]
+    second_runtime = result[1]["runtime"]
     assert_text_output(first_runtime, "'hello'")
     assert console_text(first_runtime) == []
     assert console_text(second_runtime) == ["HEY"]
@@ -835,41 +770,25 @@ def test_run_cells_attributes_stdout_to_the_emitting_cell(tmp_path: Path) -> Non
 def test_run_cells_attributes_stdout_after_html_output_to_the_emitting_cell(tmp_path: Path) -> None:
     worker = Worker()
     path = tmp_path / "stdout_after_html.py"
-    initial = worker.open_session(
-        {
-            "path": str(path),
-            "content": '# + {marimo}\n\nimport marimo as mo\nmo.md("# hello")\n\n# +\n\nprint("HEY")',
-            "input_kind": "projected",
-            "project_root": str(tmp_path),
-            "runtime_kind": "uv_project",
-        }
-    )
-    result = worker.run_cells({"session_id": initial["session_id"], "cell_ids": [cell["id"] for cell in initial["cells"]]})
-    first_runtime = result["cells"][0]["runtime"]
-    second_runtime = result["cells"][1]["runtime"]
+    payload, _ = open_projected(worker, path, '# + {marimo}\n\nimport marimo as mo\nmo.md("# hello")\n\n# +\n\nprint("HEY")')
+    result = result_cells(payload, worker.run_cells({"session_id": payload["session_id"], "cell_ids": [cell["id"] for cell in payload["cells"]]}))
+    first_runtime = result[0]["runtime"]
+    second_runtime = result[1]["runtime"]
     output = cast(dict[str, object], first_runtime["output"])
     assert output["mimetype"] in {"text/plain", "text/html", "text/markdown", "application/vnd.marimo+mimebundle"}
     assert console_text(first_runtime) == []
     assert console_text(second_runtime) == ["HEY"]
-    refreshed = worker.get_runtime_state({"session_id": initial["session_id"]})
-    assert console_text(refreshed["runtime_cells"][initial["cells"][1]["id"]]) == ["HEY"]
+    refreshed = worker.get_runtime_state({"session_id": payload["session_id"]})
+    assert console_text(refreshed["runtime_cells"][payload["cells"][1]["id"]]) == ["HEY"]
     worker.shutdown({})
 
 
 def test_run_cells_formats_runtime_tracebacks_as_error_output(tmp_path: Path) -> None:
     worker = Worker()
     path = tmp_path / "runtime_nameerror.py"
-    initial = worker.open_session(
-        {
-            "path": str(path),
-            "content": "# + {marimo}\n\ndf",
-            "input_kind": "projected",
-            "project_root": str(tmp_path),
-            "runtime_kind": "uv_project",
-        }
-    )
-    result = worker.run_cells({"session_id": initial["session_id"], "cell_ids": [initial["cells"][0]["id"]]})
-    runtime = result["cells"][0]["runtime"]
+    payload, _ = open_projected(worker, path, "# + {marimo}\n\ndf")
+    result = result_cells(payload, worker.run_cells({"session_id": payload["session_id"], "cell_ids": [payload["cells"][0]["id"]]}))
+    runtime = result[0]["runtime"]
     output = cast(dict[str, object], runtime["output"])
     assert output["mimetype"] == "application/vnd.marimo+error"
     errors = cast(list[dict[str, object]], output["data"])
@@ -881,18 +800,10 @@ def test_run_cells_formats_runtime_tracebacks_as_error_output(tmp_path: Path) ->
 def test_run_cells_preserves_multiple_definition_errors(tmp_path: Path) -> None:
     worker = Worker()
     path = tmp_path / "multiple_defs.py"
-    initial = worker.open_session(
-        {
-            "path": str(path),
-            "content": "# + {marimo}\n\nx = 1\n\n# +\n\nx = 2",
-            "input_kind": "projected",
-            "project_root": str(tmp_path),
-            "runtime_kind": "uv_project",
-        }
-    )
-    result = worker.run_cells({"session_id": initial["session_id"], "cell_ids": [cell["id"] for cell in initial["cells"]]})
-    first_runtime = result["cells"][0]["runtime"]
-    second_runtime = result["cells"][1]["runtime"]
+    payload, _ = open_projected(worker, path, "# + {marimo}\n\nx = 1\n\n# +\n\nx = 2")
+    result = result_cells(payload, worker.run_cells({"session_id": payload["session_id"], "cell_ids": [cell["id"] for cell in payload["cells"]]}))
+    first_runtime = result[0]["runtime"]
+    second_runtime = result[1]["runtime"]
     for runtime in {1: first_runtime, 2: second_runtime}.values():
         output = cast(dict[str, object], runtime["output"])
         assert output["mimetype"] == "application/vnd.marimo+error"
@@ -907,54 +818,42 @@ def test_run_cells_preserves_multiple_definition_errors(tmp_path: Path) -> None:
 def test_sync_and_run_only_reruns_changed_branch(tmp_path: Path) -> None:
     worker = Worker()
     path = tmp_path / "branch_selective.py"
-    initial = worker.open_session(
-        {
-            "path": str(path),
-            "content": (
-                "# + {marimo, setup=True}\n\ncounts = {'a': 0, 'left': 0, 'b': 0, 'final': 0}\n\n"
-                "# +\n\ncounts['a'] += 1\na = 2\ncounts['a']\n\n"
-                "# +\n\ncounts['left'] += 1\ncounts['left']\n\n"
-                "# +\n\ncounts['b'] += 1\nb = 2\ncounts['b']\n\n"
-                "# +\n\ncounts['final'] += 1\ncounts['final'] * 100 + a * b\n"
-            ),
-            "input_kind": "projected",
-            "project_root": str(tmp_path),
-            "runtime_kind": "uv_project",
-        }
+    content = (
+        "# + {marimo, setup=True}\n\ncounts = {'a': 0, 'left': 0, 'b': 0, 'final': 0}\n\n"
+        "# +\n\ncounts['a'] += 1\na = 2\ncounts['a']\n\n"
+        "# +\n\ncounts['left'] += 1\ncounts['left']\n\n"
+        "# +\n\ncounts['b'] += 1\nb = 2\ncounts['b']\n\n"
+        "# +\n\ncounts['final'] += 1\ncounts['final'] * 100 + a * b\n"
+    )
+    initial_payload, _ = open_projected(worker, path, content)
+
+    bootstrapped = result_cells(
+        initial_payload,
+        worker.sync_and_run({"session_id": initial_payload["session_id"], "payload": initial_payload}),
+    )
+    assert_text_output(bootstrapped[1]["runtime"], "1")
+    assert_text_output(bootstrapped[2]["runtime"], "1")
+    assert_text_output(bootstrapped[3]["runtime"], "1")
+    assert_text_output(bootstrapped[4]["runtime"], "104")
+
+    updated_payload = projected_payload(
+        path,
+        (
+            "# + {marimo, setup=True}\n\ncounts = {'a': 0, 'left': 0, 'b': 0, 'final': 0}\n\n"
+            "# +\n\ncounts['a'] += 1\na = 2\ncounts['a']\n\n"
+            "# +\n\ncounts['left'] += 1\ncounts['left']\n\n"
+            "# +\n\ncounts['b'] += 1\nb = 3\ncounts['b']\n\n"
+            "# +\n\ncounts['final'] += 1\ncounts['final'] * 100 + a * b\n"
+        ),
+        initial_payload,
+    )
+    updated = result_cells(
+        updated_payload,
+        worker.sync_and_run({"session_id": initial_payload["session_id"], "payload": updated_payload}),
     )
 
-    bootstrapped = worker.sync_and_run(
-        {
-            "session_id": initial["session_id"],
-            "content": (
-                "# + {marimo, setup=True}\n\ncounts = {'a': 0, 'left': 0, 'b': 0, 'final': 0}\n\n"
-                "# +\n\ncounts['a'] += 1\na = 2\ncounts['a']\n\n"
-                "# +\n\ncounts['left'] += 1\ncounts['left']\n\n"
-                "# +\n\ncounts['b'] += 1\nb = 2\ncounts['b']\n\n"
-                "# +\n\ncounts['final'] += 1\ncounts['final'] * 100 + a * b\n"
-            ),
-        }
-    )
-    assert_text_output(bootstrapped["cells"][1]["runtime"], "1")
-    assert_text_output(bootstrapped["cells"][2]["runtime"], "1")
-    assert_text_output(bootstrapped["cells"][3]["runtime"], "1")
-    assert_text_output(bootstrapped["cells"][4]["runtime"], "104")
-
-    updated = worker.sync_and_run(
-        {
-            "session_id": initial["session_id"],
-            "content": (
-                "# + {marimo, setup=True}\n\ncounts = {'a': 0, 'left': 0, 'b': 0, 'final': 0}\n\n"
-                "# +\n\ncounts['a'] += 1\na = 2\ncounts['a']\n\n"
-                "# +\n\ncounts['left'] += 1\ncounts['left']\n\n"
-                "# +\n\ncounts['b'] += 1\nb = 3\ncounts['b']\n\n"
-                "# +\n\ncounts['final'] += 1\ncounts['final'] * 100 + a * b\n"
-            ),
-        }
-    )
-
-    assert_text_output(updated["cells"][1]["runtime"], "1")
-    assert_text_output(updated["cells"][2]["runtime"], "1")
-    assert_text_output(updated["cells"][3]["runtime"], "2")
-    assert_text_output(updated["cells"][4]["runtime"], "206")
+    assert_text_output(updated[1]["runtime"], "1")
+    assert_text_output(updated[2]["runtime"], "1")
+    assert_text_output(updated[3]["runtime"], "2")
+    assert_text_output(updated[4]["runtime"], "206")
     worker.shutdown({})

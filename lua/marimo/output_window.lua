@@ -1,6 +1,7 @@
 local source = debug.getinfo(1, "S").source:sub(2)
 local dir = vim.fn.fnamemodify(source, ":h")
 local navigation = dofile(dir .. "/navigation.lua")
+local session = dofile(dir .. "/session.lua")
 local images = dofile(dir .. "/images.lua")
 local output = dofile(dir .. "/output.lua")
 local util = dofile(dir .. "/util.lua")
@@ -44,7 +45,7 @@ local function cell_display(bufnr, cell)
 	if not cell then
 		return nil
 	end
-	local runtime_by_id = vim.b[bufnr].marimo_runtime_cells or {}
+	local runtime_by_id = session.get_runtime_cells(bufnr)
 	local runtime = runtime_by_id[cell.id] or cell.runtime or {}
 	local output_image = images.extract_output_image(runtime.output)
 	local console_image = images.extract_console_image(runtime.console)
@@ -102,7 +103,7 @@ end
 
 local function centered_float_config()
 	local width = math.max(math.min(math.floor(vim.o.columns * 0.8), vim.o.columns - 4), 40)
-	local height = math.max(math.min(math.floor(vim.o.lines * 0.8), vim.o.lines - 4), 8)
+	local height = math.max(math.min(math.floor(vim.o.lines * 0.5), 24), 8)
 	local row = math.max(math.floor((vim.o.lines - height) / 2) - 1, 0)
 	local col = math.max(math.floor((vim.o.columns - width) / 2), 0)
 	return {

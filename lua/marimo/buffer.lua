@@ -2,6 +2,7 @@ local source = debug.getinfo(1, "S").source:sub(2)
 local dir = vim.fn.fnamemodify(source, ":h")
 local util = dofile(dir .. "/util.lua")
 local markers = dofile(dir .. "/markers.lua")
+local notebook = dofile(dir .. "/notebook.lua")
 local state = dofile(dir .. "/state.lua")
 local worker = dofile(dir .. "/worker.lua")
 local session = dofile(dir .. "/session.lua")
@@ -12,7 +13,7 @@ local navigation = dofile(dir .. "/navigation.lua")
 
 local M = {}
 local runtime_state = {}
-local write_projection_async = worker.request_isolated_async
+local write_notebook_async = worker.request_isolated_async
 local close_session_async = function(filepath, session_id, callback)
 	worker.request_async(filepath, "close_session", {
 		session_id = session_id,
@@ -55,15 +56,43 @@ local function stop_autorun_timer(bufnr)
 	end
 end
 
-local function apply_runtime_payload(bufnr, payload)
-	session.set_session(bufnr, payload)
-	vim.b[bufnr].marimo_runtime_cells = {}
-	for _, cell in ipairs(payload.cells or {}) do
-		vim.b[bufnr].marimo_runtime_cells[cell.id] = cell.runtime or {}
+local function sanitize_runtime_value(value)
+	if value == vim.NIL then
+		return nil
 	end
-	render.render(bufnr, payload.cells)
+	if type(value) ~= "table" then
+		return value
+	end
+	local out = vim.islist(value) and {} or vim.empty_dict()
+	for key, item in pairs(value) do
+		local sanitized = sanitize_runtime_value(item)
+		if sanitized ~= nil then
+			out[key] = sanitized
+		end
+	end
+	return out
+end
+
+local function apply_runtime_payload(bufnr, payload)
+	local runtime_cells = (payload or {}).runtime_cells or {}
+	local by_id = {}
+	for cell_id, runtime in pairs(runtime_cells) do
+		by_id[cell_id] = sanitize_runtime_value(runtime)
+	end
+	session.set_runtime_cells(bufnr, by_id)
+	local cells = vim.deepcopy(vim.b[bufnr].marimo_cells or {})
+	for _, cell in ipairs(cells) do
+		cell.runtime = by_id[cell.id] or {}
+	end
+	vim.b[bufnr].marimo_cells = cells
+	render.render(bufnr, cells)
 	output_window.refresh(bufnr)
 	util.request_redraw()
+end
+
+local function apply_session_payload(bufnr, payload)
+	session.set_session(bufnr, payload)
+	apply_runtime_payload(bufnr, { runtime_cells = payload.runtime_cells or {} })
 end
 
 local function apply_current_projection_ranges(payload, lines)
@@ -83,11 +112,11 @@ end
 
 local function merge_runtime_cells(bufnr, runtime_cells)
 	local cells = vim.b[bufnr].marimo_cells or {}
-	local by_id = vim.b[bufnr].marimo_runtime_cells or {}
+	local by_id = session.get_runtime_cells(bufnr)
 	for cell_id, runtime in pairs(runtime_cells or {}) do
-		by_id[cell_id] = runtime
+		by_id[cell_id] = sanitize_runtime_value(runtime)
 	end
-	vim.b[bufnr].marimo_runtime_cells = by_id
+	session.set_runtime_cells(bufnr, by_id)
 	for _, cell in ipairs(cells) do
 		if by_id[cell.id] ~= nil then
 			cell.runtime = by_id[cell.id]
@@ -99,7 +128,7 @@ local function merge_runtime_cells(bufnr, runtime_cells)
 end
 
 local function mark_cells_pending(bufnr, cell_ids)
-	local current = vim.b[bufnr].marimo_runtime_cells or {}
+	local current = session.get_runtime_cells(bufnr)
 	local updates = {}
 	for _, cell_id in ipairs(cell_ids or {}) do
 		local runtime = vim.deepcopy(current[cell_id] or {})
@@ -139,6 +168,77 @@ local function update_cell_marker(bufnr, cell, mutate)
 	return true
 end
 
+local function serialize_snapshot(filepath, snapshot)
+	local serialized, err = worker.request(filepath, "serialize_notebook", {
+		path = filepath,
+		snapshot = {
+			session_id = snapshot.session_id or filepath,
+			path = filepath,
+			header = snapshot.header,
+			app_options = snapshot.app_options or vim.empty_dict(),
+			cells = snapshot.cells or {},
+		},
+	})
+	if err then
+		return nil, err
+	end
+	return serialized
+end
+
+local function build_payload(filepath, snapshot, project_root, runtime_kind, last_saved_source_hash, projected_lines)
+	local serialized, err = serialize_snapshot(filepath, snapshot)
+	if err then
+		return nil, err
+	end
+	return notebook.build_payload({
+		session_id = snapshot.session_id or filepath,
+		path = filepath,
+		project_root = project_root,
+		runtime_kind = runtime_kind,
+		header = snapshot.header,
+		app_options = snapshot.app_options or vim.empty_dict(),
+		cells = snapshot.cells or {},
+		projected_lines = projected_lines,
+		canonical_source = serialized.canonical_source,
+		canonical_ranges = serialized.canonical_ranges or {},
+		disabled_transitively = serialized.disabled_transitively or {},
+		last_saved_source_hash = last_saved_source_hash,
+	})
+end
+
+local function payload_from_buffer(bufnr, lines)
+	local filepath = vim.api.nvim_buf_get_name(bufnr)
+	local project_root, runtime_kind = worker.resolve_runtime(filepath)
+	local cells = notebook.parse_projected_snapshot(lines, vim.b[bufnr].marimo_cells)
+	return build_payload(filepath, {
+		session_id = vim.b[bufnr].marimo_session_id or filepath,
+		header = vim.b[bufnr].marimo_header,
+		app_options = vim.b[bufnr].marimo_app_options or vim.empty_dict(),
+		cells = cells,
+	}, project_root, runtime_kind, vim.b[bufnr].marimo_last_saved_source_hash, lines)
+end
+
+local function changed_cell_ids(previous_cells, current_cells)
+	local previous_by_id = {}
+	for _, cell in ipairs(previous_cells or {}) do
+		previous_by_id[cell.id] = cell
+	end
+	local changed = {}
+	for _, cell in ipairs(current_cells or {}) do
+		local previous = previous_by_id[cell.id]
+		if previous == nil
+			or previous.code ~= cell.code
+			or previous.name ~= cell.name
+			or vim.deep_equal(previous.options or {}, cell.options or {}) == false
+		then
+			if (cell.options or {}).disabled ~= true then
+				table.insert(changed, cell.id)
+			end
+		end
+	end
+	return changed
+end
+
 
 local function apply_projection_payload(bufnr, payload, keep_modified, opts)
 	opts = opts or {}
@@ -154,7 +254,7 @@ local function apply_projection_payload(bufnr, payload, keep_modified, opts)
 		final_lines = payload.projected_lines or current
 	end
 	payload = apply_current_projection_ranges(payload, final_lines)
-	apply_runtime_payload(bufnr, payload)
+	apply_session_payload(bufnr, payload)
 	lsp_bridge.sync_mirror(bufnr, payload.canonical_source)
 	vim.bo[bufnr].modified = keep_modified and true or false
 end
@@ -170,7 +270,7 @@ local function handle_async_payload(bufnr, generation, keep_modified, payload, e
 	if generation and state_for(bufnr).request_id ~= generation then
 		return
 	end
-	apply_projection_payload(bufnr, payload, keep_modified, { update_buffer_lines = false })
+	apply_runtime_payload(bufnr, payload)
 end
 
 local function handle_async_runtime_payload(bufnr, request_id, payload, err)
@@ -200,11 +300,6 @@ local function handle_async_runtime_event(bufnr, request_id, event)
 	if event.event == "runtime_update" then
 		local payload = event.payload or {}
 		merge_runtime_cells(bufnr, payload.runtime_cells or {})
-		return
-	end
-	if event.event == "session_update" then
-		local payload = event.payload or {}
-		apply_projection_payload(bufnr, payload, true, { update_buffer_lines = false })
 	end
 end
 
@@ -220,7 +315,7 @@ local function finish_projected_write(bufnr, request, payload, err)
 		local next_request = entry.pending_write
 		entry.pending_write = nil
 		entry.write_in_flight = next_request.generation
-		write_projection_async(next_request.filepath, "write_projection", next_request.params, function(next_payload, next_err)
+		write_notebook_async(next_request.filepath, "write_notebook", next_request.params, function(next_payload, next_err)
 			finish_projected_write(bufnr, next_request, next_payload, next_err)
 		end)
 	end
@@ -235,7 +330,7 @@ local function finish_projected_write(bufnr, request, payload, err)
 		return
 	end
 	vim.b[bufnr].marimo_canonical_source = payload.canonical_source or vim.b[bufnr].marimo_canonical_source
-	vim.b[bufnr].marimo_last_saved_source_hash = payload.last_saved_source_hash
+	vim.b[bufnr].marimo_last_saved_source_hash = payload.last_saved_source_hash or vim.b[bufnr].marimo_last_saved_source_hash
 	lsp_bridge.sync_mirror(bufnr, vim.b[bufnr].marimo_canonical_source)
 	if vim.api.nvim_buf_get_changedtick(bufnr) == request.changedtick then
 		vim.bo[bufnr].modified = false
@@ -245,6 +340,18 @@ local function finish_projected_write(bufnr, request, payload, err)
 end
 
 local function enqueue_projected_write(bufnr, filepath, lines)
+	local ok, cells_or_err = pcall(notebook.parse_projected_snapshot, lines, vim.b[bufnr].marimo_cells)
+	if not ok then
+		util.notify("failed to write marimo notebook: " .. cells_or_err, vim.log.levels.ERROR)
+		return
+	end
+	local snapshot = {
+		session_id = vim.b[bufnr].marimo_session_id or filepath,
+		path = filepath,
+		header = vim.b[bufnr].marimo_header,
+		app_options = vim.b[bufnr].marimo_app_options or vim.empty_dict(),
+		cells = cells_or_err,
+	}
 	local entry = state_for(bufnr)
 	entry.write_generation = entry.write_generation + 1
 	local request = {
@@ -253,9 +360,7 @@ local function enqueue_projected_write(bufnr, filepath, lines)
 		changedtick = vim.api.nvim_buf_get_changedtick(bufnr),
 		params = {
 			path = filepath,
-			content = util.join_lines(lines),
-			header = vim.b[bufnr].marimo_header,
-			app_options = vim.b[bufnr].marimo_app_options or vim.empty_dict(),
+			snapshot = snapshot,
 		},
 	}
 	if entry.write_in_flight then
@@ -263,7 +368,7 @@ local function enqueue_projected_write(bufnr, filepath, lines)
 		return
 	end
 	entry.write_in_flight = request.generation
-	write_projection_async(filepath, "write_projection", request.params, function(payload, err)
+	write_notebook_async(filepath, "write_notebook", request.params, function(payload, err)
 		finish_projected_write(bufnr, request, payload, err)
 	end)
 end
@@ -283,25 +388,40 @@ function M.reload_raw_buffer(bufnr)
 	runtime_state[bufnr] = nil
 	output_window.close(bufnr)
 	render.clear(bufnr)
-	state.clear_projected_state(bufnr)
+	session.clear_session(bufnr)
 	vim.bo[bufnr].modified = false
 	return true
 end
 
-local function open_with_worker(bufnr, input_kind, opts)
+local function open_with_snapshot(bufnr, snapshot, opts)
 	local filepath = vim.api.nvim_buf_get_name(bufnr)
 	local keep_modified = vim.bo[bufnr].modified
-	local payload, err = worker.request(filepath, "open_session", {
-		path = filepath,
-		content = util.join_lines(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)),
-		input_kind = input_kind,
-	})
+	local project_root, runtime_kind = worker.resolve_runtime(filepath)
+	local payload, err = build_payload(
+		filepath,
+		snapshot,
+		project_root,
+		runtime_kind,
+		vim.b[bufnr].marimo_last_saved_source_hash,
+		snapshot.projected_lines
+	)
 	if err then
 		util.notify("failed to open marimo session: " .. err, vim.log.levels.ERROR)
 		return false
 	end
+	local runtime_payload, open_err = worker.request(filepath, "open_session", {
+		path = filepath,
+		project_root = project_root,
+		runtime_kind = runtime_kind,
+		payload = payload,
+	})
+	if open_err then
+		util.notify("failed to open marimo session: " .. open_err, vim.log.levels.ERROR)
+		return false
+	end
+	payload.runtime_cells = runtime_payload.runtime_cells or {}
 	apply_projection_payload(bufnr, payload, keep_modified, {
-		update_buffer_lines = input_kind ~= "projected",
+		update_buffer_lines = true,
 	})
 	if opts.ensure_projected_buffer_setup then
 		opts.ensure_projected_buffer_setup(bufnr)
@@ -330,7 +450,16 @@ function M.project_buffer(bufnr, opts)
 		return
 	end
 
-	open_with_worker(bufnr, "raw_marimo", opts)
+	local filepath = vim.api.nvim_buf_get_name(bufnr)
+	local snapshot, err = worker.request(filepath, "load_raw_notebook", {
+		path = filepath,
+		content = util.join_lines(lines),
+	})
+	if err then
+		util.notify("failed to open marimo session: " .. err, vim.log.levels.ERROR)
+		return false
+	end
+	return open_with_snapshot(bufnr, snapshot, opts)
 end
 
 function M.write_buffer(bufnr)
@@ -365,18 +494,24 @@ function M.sync_buffer(bufnr, opts)
 	end
 	local keep_modified = vim.bo[bufnr].modified
 	local filepath = vim.api.nvim_buf_get_name(bufnr)
-	local method = opts.autorun == false and "sync_projection" or "sync_and_run"
-	local payload, err = worker.request(filepath, method, {
-		session_id = vim.b[bufnr].marimo_session_id,
-		content = util.join_lines(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)),
-	})
+	local payload, err = payload_from_buffer(bufnr, vim.api.nvim_buf_get_lines(bufnr, 0, -1, false))
 	if err then
 		util.notify("failed to sync marimo projection: " .. err, vim.log.levels.ERROR)
+		return
+	end
+	local method = opts.autorun == false and "sync_projection" or "sync_and_run"
+	local runtime_payload, request_err = worker.request(filepath, method, {
+		session_id = vim.b[bufnr].marimo_session_id,
+		payload = payload,
+	})
+	if request_err then
+		util.notify("failed to sync marimo projection: " .. request_err, vim.log.levels.ERROR)
 		return
 	end
 	if opts.generation and state_for(bufnr).request_id ~= opts.generation then
 		return
 	end
+	payload.runtime_cells = runtime_payload.runtime_cells or {}
 	apply_projection_payload(bufnr, payload, keep_modified, { update_buffer_lines = false })
 end
 
@@ -401,15 +536,26 @@ function M.format_buffer(bufnr)
 		return true
 	end
 	local filepath = vim.api.nvim_buf_get_name(bufnr)
-	local payload, err = worker.request(filepath, "sync_projection", {
-		session_id = vim.b[bufnr].marimo_session_id,
-		content = util.join_lines(lines),
-	})
+	local ok, normalized_or_err = pcall(markers.normalize_projected_buffer_lines, lines)
+	if not ok then
+		util.notify("failed to format marimo projection: " .. normalized_or_err, vim.log.levels.ERROR)
+		return false, normalized_or_err
+	end
+	local payload, err = payload_from_buffer(bufnr, normalized_or_err)
 	if err then
 		util.notify("failed to format marimo projection: " .. err, vim.log.levels.ERROR)
 		return false, err
 	end
+	local runtime_payload, request_err = worker.request(filepath, "sync_projection", {
+		session_id = vim.b[bufnr].marimo_session_id,
+		payload = payload,
+	})
+	if request_err then
+		util.notify("failed to format marimo projection: " .. request_err, vim.log.levels.ERROR)
+		return false, request_err
+	end
 	local changed = vim.deep_equal(lines, payload.projected_lines or {}) == false
+	payload.runtime_cells = runtime_payload.runtime_cells or {}
 	apply_projection_payload(bufnr, payload, vim.bo[bufnr].modified or changed, {
 		update_buffer_lines = true,
 	})
@@ -437,13 +583,21 @@ function M.schedule_sync(bufnr, opts)
 			if state_for(bufnr).request_id ~= generation then
 				return
 			end
-			local keep_modified = vim.bo[bufnr].modified
 			local filepath = vim.api.nvim_buf_get_name(bufnr)
+			local payload, err = payload_from_buffer(bufnr, vim.api.nvim_buf_get_lines(bufnr, 0, -1, false))
+			if err then
+				util.notify("failed to sync marimo projection: " .. err, vim.log.levels.ERROR)
+				return
+			end
+			local keep_modified = vim.bo[bufnr].modified
+			local changed_ids = changed_cell_ids(vim.b[bufnr].marimo_cells, payload.cells)
+			apply_projection_payload(bufnr, payload, keep_modified, { update_buffer_lines = false })
+			mark_cells_pending(bufnr, changed_ids)
 			worker.request_async(filepath, "sync_and_run", {
 				session_id = vim.b[bufnr].marimo_session_id,
-				content = util.join_lines(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)),
-			}, function(payload, err)
-				handle_async_payload(bufnr, generation, keep_modified, payload, err)
+				payload = payload,
+			}, function(runtime_payload, async_err)
+				handle_async_payload(bufnr, generation, true, runtime_payload, async_err)
 			end, function(event)
 				handle_async_runtime_event(bufnr, generation, event)
 			end)
@@ -567,19 +721,60 @@ function M.activate(bufnr, opts)
 	end
 
 	if markers.looks_like_projected(lines) then
-		open_with_worker(bufnr, "projected", opts)
+		local ok, cells_or_err = pcall(notebook.parse_projected_snapshot, lines, nil)
+		if not ok then
+			util.notify(cells_or_err, vim.log.levels.ERROR)
+			return
+		end
+		open_with_snapshot(bufnr, {
+			session_id = vim.api.nvim_buf_get_name(bufnr),
+			header = nil,
+			app_options = vim.empty_dict(),
+			cells = cells_or_err,
+			projected_lines = lines,
+		}, opts)
 		return
 	end
 
 	if markers.has_any_projected_markers(lines) then
 		if opts.manual then
-			open_with_worker(bufnr, "generic_projected_promotable", opts)
+			local ok, cells_or_err = pcall(notebook.manual_snapshot, util.join_lines(lines))
+			if not ok then
+				util.notify(cells_or_err, vim.log.levels.ERROR)
+				return
+			end
+			local promoted_ok, promoted_lines_or_err, changed = pcall(markers.promote_first_marker_to_marimo, vim.deepcopy(lines))
+			if not promoted_ok then
+				util.notify(promoted_lines_or_err, vim.log.levels.ERROR)
+				return
+			end
+			if not changed then
+				util.notify("failed to promote projected markers to marimo cells", vim.log.levels.ERROR)
+				return
+			end
+			open_with_snapshot(bufnr, {
+				session_id = vim.api.nvim_buf_get_name(bufnr),
+				header = nil,
+				app_options = vim.empty_dict(),
+				cells = cells_or_err,
+				projected_lines = promoted_lines_or_err,
+			}, opts)
 		end
 		return
 	end
 
 	if opts.manual then
-		open_with_worker(bufnr, "manual_python", opts)
+		local ok, cells_or_err = pcall(notebook.manual_snapshot, util.join_lines(lines))
+		if not ok then
+			util.notify(cells_or_err, vim.log.levels.ERROR)
+			return
+		end
+		open_with_snapshot(bufnr, {
+			session_id = vim.api.nvim_buf_get_name(bufnr),
+			header = nil,
+			app_options = vim.empty_dict(),
+			cells = cells_or_err,
+		}, opts)
 		return
 	end
 
@@ -615,7 +810,7 @@ function M.reconcile_buffer(bufnr, opts)
 				render.render(bufnr, cells)
 				return
 			end
-			open_with_worker(bufnr, "raw_marimo", opts)
+			M.project_buffer(bufnr, opts)
 		end
 		return
 	end
@@ -665,7 +860,7 @@ end
 
 M._private = {
 	set_write_projection_async = function(fn)
-		write_projection_async = fn or worker.request_isolated_async
+		write_notebook_async = fn or worker.request_isolated_async
 	end,
 	set_close_session_async = function(fn)
 		close_session_async = fn

@@ -956,18 +956,19 @@ local function test_reentering_buffer_does_not_rerun_runtime()
 	vim.cmd("Marimo on")
 	vim.cmd("MarimoRunAll")
 	wait_for_truthy(function()
-		local runtime_cells = vim.b.marimo_runtime_cells or {}
-		for _, runtime in pairs(runtime_cells) do
-			if runtime.output and runtime.output.data ~= nil then
-				return true
+			for _, cell in ipairs(vim.b.marimo_cells or {}) do
+				local runtime = cell.runtime or {}
+				if runtime.output and runtime.output.data ~= nil then
+					return true
+				end
 			end
-		end
 		return false
 	end, "timed out waiting for runtime output")
 
 	local session_id = vim.b.marimo_session_id
 	local output_before = nil
-	for _, runtime in pairs(vim.b.marimo_runtime_cells or {}) do
+	for _, cell in ipairs(vim.b.marimo_cells or {}) do
+		local runtime = cell.runtime or {}
 		if runtime.output and runtime.output.data ~= nil then
 			output_before = runtime.output.data
 			break
@@ -984,7 +985,8 @@ local function test_reentering_buffer_does_not_rerun_runtime()
 	vim.o.hidden = previous_hidden
 
 	local output_after = nil
-	for _, runtime in pairs(vim.b.marimo_runtime_cells or {}) do
+	for _, cell in ipairs(vim.b.marimo_cells or {}) do
+		local runtime = cell.runtime or {}
 		if runtime.output and runtime.output.data ~= nil then
 			output_after = runtime.output.data
 			break
@@ -1112,8 +1114,8 @@ local function test_runtime_errors_include_descriptive_stderr_context()
 	vim.cmd("Marimo on")
 	vim.cmd("MarimoRunAll")
 	wait_for_truthy(function()
-		local runtime_cells = vim.b.marimo_runtime_cells or {}
-		for _, runtime in pairs(runtime_cells) do
+		for _, cell in ipairs(vim.b.marimo_cells or {}) do
+			local runtime = cell.runtime or {}
 			if runtime.output and runtime.output.mimetype == "application/vnd.marimo+error" then
 				return true
 			end
