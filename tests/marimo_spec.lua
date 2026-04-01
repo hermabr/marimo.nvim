@@ -907,6 +907,28 @@ local function test_render_partial_updates_preserve_unrelated_extmarks()
 	assert_eq(updated_marks[2][1], second_mark)
 end
 
+local function test_completed_run_clears_pending_runtime_without_idle_status()
+	local runtime = dofile(vim.fn.getcwd() .. "/lua/marimo/runtime.lua")
+	local runtime_by_id = {
+		["cell-1"] = { status = "queued", console = {} },
+		["cell-2"] = { status = "running", console = {}, _running_timestamp = 123 },
+		["cell-3"] = { status = "idle", console = {} },
+	}
+
+	local next_runtime, changed, changed_ids = runtime.apply_operation(runtime_by_id, {
+		op = "completed-run",
+	})
+
+	assert_truthy(changed, "expected completed-run to clear pending runtime state")
+	assert_eq(next_runtime["cell-1"].status, "idle")
+	assert_eq(next_runtime["cell-2"].status, "idle")
+	assert_eq(next_runtime["cell-2"]._running_timestamp, nil)
+	assert_eq(next_runtime["cell-3"].status, "idle")
+	assert_truthy(vim.tbl_contains(changed_ids or {}, "cell-1"))
+	assert_truthy(vim.tbl_contains(changed_ids or {}, "cell-2"))
+	assert_truthy(not vim.tbl_contains(changed_ids or {}, "cell-3"))
+end
+
 local function test_runtime_outputs_render_below_cells()
 	local path = make_path("runtime_outputs.py")
 	write_file(path, "# + {marimo}\n\nx = 1\nx\n\n# +\n\ny = x + 1\ny")
@@ -1066,6 +1088,44 @@ local function test_sync_buffer_clears_stale_cell_output_while_rerunning()
 
 	local final_lines = table.concat(rendered_lines(), "\n")
 	assert_truthy(not final_lines:match(" n=1"), "expected old stdout to stay cleared after rerun")
+end
+
+local function test_sync_buffer_recovers_after_syntax_error()
+	local path = make_path("runtime_syntax_recovery.py")
+	write_file(path, "# + {marimo}\n\nn = 1\nprint(n)\nn\n\n# +\n\nm = n + 1\nm")
+	edit(path)
+
+	vim.cmd("Marimo on")
+	vim.cmd("MarimoRunAll")
+	wait_for_match(" 1")
+	wait_for_match(" 2")
+
+	vim.api.nvim_buf_set_lines(0, 2, 4, false, {
+		"n = 7",
+		"print(n",
+	})
+	require("marimo").sync_buffer(0)
+
+	wait_for_match("was never closed", 7000)
+	wait_for_truthy(function()
+		local lines = table.concat(rendered_lines(), "\n")
+		return not lines:match("marimo queued") and not lines:match("marimo running")
+	end, "timed out waiting for syntax error run to settle", 7000)
+
+	vim.api.nvim_buf_set_lines(0, 3, 4, false, { "print(n)" })
+	require("marimo").sync_buffer(0)
+
+	wait_for_match(" 7", 7000)
+	wait_for_match(" 8", 7000)
+	wait_for_truthy(function()
+		local lines = table.concat(rendered_lines(), "\n")
+		return not lines:match("marimo queued") and not lines:match("marimo running")
+	end, "timed out waiting for syntax recovery run to settle", 7000)
+
+	local lines = table.concat(rendered_lines(), "\n")
+	assert_truthy(not lines:match("SyntaxError"), "expected syntax error output to clear after fixing code")
+	assert_truthy(not lines:match("marimo queued"), "expected queued placeholder to clear after syntax recovery")
+	assert_truthy(not lines:match("marimo running"), "expected running placeholder to clear after syntax recovery")
 end
 
 local function test_reentering_reprojects_after_raw_reload()
@@ -1343,6 +1403,7 @@ local tests = {
 	test_marimo_output_renders_images_in_float,
 	test_jump_next_cell_appends_new_cell_and_enters_insert_mode,
 	test_render_partial_updates_preserve_unrelated_extmarks,
+	test_completed_run_clears_pending_runtime_without_idle_status,
 	test_runtime_outputs_render_below_cells,
 	test_runtime_image_outputs_use_snacks_image,
 	test_stringified_image_bundle_outputs_use_snacks_image,
@@ -1355,6 +1416,7 @@ local tests = {
 	test_opening_without_running_does_not_render_idle_placeholders,
 	test_sync_buffer_updates_reactive_outputs,
 	test_sync_buffer_clears_stale_cell_output_while_rerunning,
+	test_sync_buffer_recovers_after_syntax_error,
 	test_reentering_reprojects_after_raw_reload,
 	test_reentering_buffer_does_not_rerun_runtime,
 	test_runtime_outputs_include_stdout,
