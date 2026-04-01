@@ -45,10 +45,10 @@ your normal Neovim config.
   empty cells collapse to a single empty cell.
 - Adds buffer-local cell navigation for projected marimo buffers:
   ` [m` jumps to the previous cell and `]m` jumps to the next cell.
+- Adds buffer-local run keymaps for projected marimo buffers:
+  `<leader>mr` runs the current cell and `<leader>mR` runs all cells.
 - Adds a buffer-local disabled toggle for the current cell:
   `<leader>md` toggles `marimo_disabled` on the current projected cell.
-- Adds buffer-local execution keymaps:
-  `<leader>mr` runs the current cell and `<leader>mR` runs all cells.
 - Automatically creates a new trailing `# +` cell when jumping past the last
   cell.
 

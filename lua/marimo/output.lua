@@ -356,6 +356,14 @@ local function render_error_output(data, opts)
 			end
 		else
 			local message = as_string(err.msg) or as_string(err.evalue) or as_string(err.ename) or as_string(err.type) or "[marimo error]"
+			if err.type == "multiple-defs" then
+				local name = as_string(err.name)
+				if name and name ~= "" then
+					message = string.format("%s defined by another cell", name)
+				else
+					message = "defined by another cell"
+				end
+			end
 			table.insert(lines, message)
 			if err.type == "multiple-defs" and type(err.cells) == "table" then
 				for _, cell_id in ipairs(err.cells) do
@@ -525,8 +533,12 @@ local function status_label(runtime)
 	return "marimo " .. (as_string(runtime.status) or "idle")
 end
 
-local function show_status_line(runtime)
+local function show_status_line(runtime, output_lines, console_lines)
+	local has_visible_output = #(output_lines or {}) > 0 or #(console_lines or {}) > 0
 	if runtime.stale_inputs then
+		if has_visible_output and runtime.status ~= "running" and runtime.status ~= "queued" then
+			return false
+		end
 		return true
 	end
 	return runtime.status == "running" or runtime.status == "queued" or runtime.status == "disabled-transitively"
@@ -543,7 +555,7 @@ function M.runtime_sections(runtime, opts)
 		console = {},
 	}
 
-	if show_status_line(runtime) then
+	if show_status_line(runtime, output_lines, console_lines) then
 		sections.status = {
 			text = status_label(runtime),
 			highlight = status_highlight(runtime, output_highlight),

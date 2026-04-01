@@ -1,6 +1,10 @@
 local M = {}
+local next_local_id = 0
 
 function M.notify(msg, level)
+	if vim.g.marimo_shutting_down == true or tonumber(vim.v.exiting) ~= 0 then
+		return
+	end
 	vim.notify("marimo.nvim: " .. msg, level or vim.log.levels.INFO)
 end
 
@@ -37,6 +41,11 @@ function M.request_redraw()
 	vim.schedule(function()
 		pcall(vim.cmd, "redraw")
 	end)
+end
+
+function M.new_local_id()
+	next_local_id = next_local_id + 1
+	return string.format("marimo-nvim-%d-%d", vim.uv.hrtime(), next_local_id)
 end
 
 return M
