@@ -8,6 +8,7 @@ dependencies = []
 [dependency-groups]
 dev = [
   "marimo",
+  "pyzmq",
   "pytest",
   "ruff",
   "ty",

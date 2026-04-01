@@ -36,7 +36,7 @@ local function launch_spec(path)
 		vim.list_extend(cmd, { "--project", project_root })
 		runtime_kind = "uv_project"
 	end
-	vim.list_extend(cmd, { "--directory", root, "--with", "marimo", "python", "-m", "marimo_nvim_py.worker" })
+	vim.list_extend(cmd, { "--directory", root, "--with", "marimo", "--with", "pyzmq", "python", "-m", "marimo_nvim_py.worker" })
 	return {
 		project_root = project_root,
 		runtime_kind = runtime_kind,

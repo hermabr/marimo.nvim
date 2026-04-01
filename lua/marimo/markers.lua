@@ -318,6 +318,31 @@ function M.projected_cell_ranges(lines)
 	return ranges
 end
 
+function M.parse_projected_cells(lines)
+	local parsed = parse_projected_buffer_cells(lines)
+	local cells = {}
+	for idx, cell in ipairs(parsed) do
+		local options = vim.deepcopy(cell.options or {})
+		local is_setup = options.setup == true
+		options.setup = nil
+		if idx == 1 then
+			options.marimo = nil
+		end
+		table.insert(cells, {
+			name = is_setup and "setup" or "_",
+			options = options,
+			code = table.concat(cell.body or {}, "\n"),
+			projection_range = vim.deepcopy(cell.range),
+		})
+	end
+	for idx, cell in ipairs(cells) do
+		if cell.name == "setup" and idx ~= 1 then
+			error("setup cell must be the first cell")
+		end
+	end
+	return cells
+end
+
 function M.render_projected_buffer_lines(cells)
 	local projected = {}
 	for idx, cell in ipairs(cells or {}) do

@@ -10,6 +10,7 @@ function M.set_session(bufnr, payload)
 	vim.b[bufnr].marimo_cells = payload.cells or {}
 	vim.b[bufnr].marimo_runtime_enabled = true
 	vim.b[bufnr].marimo_runtime_cells = {}
+	vim.b[bufnr].marimo_runtime_started = vim.b[bufnr].marimo_runtime_started == true
 	vim.b[bufnr].marimo_projection_map = payload.projection_map or {}
 	vim.b[bufnr].marimo_canonical_source = payload.canonical_source or ""
 	vim.b[bufnr].marimo_last_saved_source_hash = payload.last_saved_source_hash
@@ -25,6 +26,7 @@ function M.clear_session(bufnr)
 	vim.b[bufnr].marimo_cells = nil
 	vim.b[bufnr].marimo_runtime_cells = nil
 	vim.b[bufnr].marimo_runtime_enabled = nil
+	vim.b[bufnr].marimo_runtime_started = nil
 	vim.b[bufnr].marimo_projection_map = nil
 	vim.b[bufnr].marimo_canonical_source = nil
 	vim.b[bufnr].marimo_last_saved_source_hash = nil
