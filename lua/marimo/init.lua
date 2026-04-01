@@ -13,10 +13,13 @@ local M = {}
 local group = vim.api.nvim_create_augroup("marimo.nvim", { clear = true })
 local setup_opts = {
 	keymaps = {
+		mode_toggle = "<leader>mm",
 		prev_cell = "[m",
 		next_cell = "]m",
 		run_cell = "<leader>mr",
 		run_all_cells = "<leader>mR",
+		interrupt = "<leader>mi",
+		format = "<leader>mf",
 		toggle_disabled = "<leader>md",
 		show_output = "<leader>mo",
 	},
@@ -74,6 +77,15 @@ local function ensure_navigation_keymaps(bufnr)
 	end
 
 	local keymaps = setup_opts.keymaps or {}
+	if keymaps.mode_toggle then
+		vim.keymap.set("n", keymaps.mode_toggle, function()
+			M.set_mode(not vim.b[bufnr].marimo_projected, {
+				bufnr = bufnr,
+				manual = true,
+				ensure_projected_buffer_setup = ensure_projected_buffer_setup,
+			})
+		end, { buffer = bufnr, silent = true, desc = "Marimo: toggle mode" })
+	end
 	if keymaps.prev_cell then
 		vim.keymap.set("n", keymaps.prev_cell, function()
 			M.jump_prev_cell(bufnr)
@@ -93,6 +105,19 @@ local function ensure_navigation_keymaps(bufnr)
 		vim.keymap.set("n", keymaps.run_all_cells, function()
 			M.run_all_cells(bufnr)
 		end, { buffer = bufnr, silent = true, desc = "Marimo: run all cells" })
+	end
+	if keymaps.interrupt then
+		vim.keymap.set("n", keymaps.interrupt, function()
+			M.interrupt(bufnr)
+		end, { buffer = bufnr, silent = true, desc = "Marimo: interrupt runtime" })
+	end
+	if keymaps.format then
+		vim.keymap.set("n", keymaps.format, function()
+			local ok, err = M.format_buffer(bufnr)
+			if not ok and err then
+				util.notify(err, vim.log.levels.WARN)
+			end
+		end, { buffer = bufnr, silent = true, desc = "Marimo: format buffer" })
 	end
 	if keymaps.toggle_disabled then
 		vim.keymap.set("n", keymaps.toggle_disabled, function()
