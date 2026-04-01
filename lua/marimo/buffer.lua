@@ -129,7 +129,9 @@ local function apply_snapshot(bufnr, snapshot, canonical_source, keep_modified, 
 	session.set_session(bufnr, payload)
 	lsp_bridge.sync_mirror(bufnr, canonical_source)
 	vim.bo[bufnr].modified = keep_modified and true or false
-	refresh_cells(bufnr)
+	if opts.skip_refresh ~= true then
+		refresh_cells(bufnr, opts.render_opts)
+	end
 end
 
 local function serialize_snapshot(bufnr, snapshot)
@@ -202,6 +204,7 @@ local function start_snapshot_serialization(bufnr, request)
 			update_buffer_lines = false,
 			projected_lines = request.projected_lines,
 			last_saved_source_hash = vim.b[bufnr].marimo_last_saved_source_hash,
+			skip_refresh = true,
 		})
 	end)
 end
@@ -227,10 +230,21 @@ local function sync_local_snapshot_async(bufnr, snapshot, projected_lines, keep_
 	opts = opts or {}
 	snapshot_state.attach_projected_ranges(snapshot, projected_lines)
 	preserve_canonical_ranges(snapshot, opts.previous_cells, opts.changed_ids)
+	local render_opts = nil
+	local changed_ids = opts.changed_ids or {}
+	local deleted_ids = opts.deleted_ids or {}
+	if opts.update_buffer_lines ~= true and (#changed_ids > 0 or #deleted_ids > 0) then
+		render_opts = {
+			changed_ids = vim.deepcopy(changed_ids),
+			deleted_ids = vim.deepcopy(deleted_ids),
+		}
+	end
 	apply_snapshot(bufnr, snapshot, vim.b[bufnr].marimo_canonical_source or "", keep_modified, {
 		update_buffer_lines = opts.update_buffer_lines,
 		projected_lines = projected_lines,
 		last_saved_source_hash = vim.b[bufnr].marimo_last_saved_source_hash,
+		render_opts = render_opts,
+		skip_refresh = opts.update_buffer_lines ~= true and render_opts == nil,
 	})
 	queue_snapshot_serialization(bufnr, snapshot, projected_lines)
 	return snapshot
@@ -496,6 +510,7 @@ local function sync_context_from_buffer(bufnr, opts)
 		update_buffer_lines = opts.update_buffer_lines,
 		previous_cells = previous_cells,
 		changed_ids = changed_ids,
+		deleted_ids = deleted_ids,
 	})
 	return synced_snapshot, changed_ids, deleted_ids, nil
 end
@@ -605,6 +620,7 @@ local function finish_projected_write(bufnr, request, payload, err)
 		apply_snapshot(bufnr, request.snapshot, canonical_source, false, {
 			update_buffer_lines = false,
 			last_saved_source_hash = last_saved_source_hash,
+			skip_refresh = true,
 		})
 	else
 		vim.b[bufnr].marimo_canonical_source = canonical_source

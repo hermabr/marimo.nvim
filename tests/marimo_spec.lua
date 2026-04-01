@@ -1393,6 +1393,43 @@ local function test_run_current_cell_command_refreshes_output()
 	assert_matches(lines, " 7")
 end
 
+local function test_run_current_cell_does_not_recreate_unrelated_image_placements()
+	local path = make_path("runtime_run_current_image_stability.py")
+	reset_snacks_image_calls()
+	write_file(
+		path,
+		'# + {marimo}\n\nimport marimo as mo\nmo.image(src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wn9lD8AAAAASUVORK5CYII=")\n\n# +\n\nimport random\nrandom.random()'
+	)
+	edit(path)
+
+	vim.cmd("Marimo on")
+	vim.cmd("MarimoRunAll")
+	wait_for_truthy(function()
+		if #snacks_image_calls.new == 0 then
+			return false
+		end
+		local cells = vim.b.marimo_cells or {}
+		local runtime_cells = vim.b.marimo_runtime_cells or {}
+		local target = cells[2] and runtime_cells[cells[2].id] or nil
+		return target ~= nil and target.output ~= nil and target.output.data ~= nil
+	end, "timed out waiting for image notebook to finish running")
+
+	local target_cell_id = vim.b.marimo_cells[2].id
+	local previous_output = tostring(vim.b.marimo_runtime_cells[target_cell_id].output.data)
+	local initial_calls = #snacks_image_calls.new
+	local initial_closed = snacks_image_calls.closed
+
+	vim.api.nvim_win_set_cursor(0, { 9, 0 })
+	vim.cmd("MarimoRunCell")
+	wait_for_truthy(function()
+		local runtime = (vim.b.marimo_runtime_cells or {})[target_cell_id] or {}
+		return runtime.status == "idle" and runtime.output and tostring(runtime.output.data) ~= previous_output
+	end, "timed out waiting for targeted rerun")
+
+	assert_eq(#snacks_image_calls.new, initial_calls)
+	assert_eq(snacks_image_calls.closed, initial_closed)
+end
+
 local function test_interrupt_clears_running_placeholder()
 	local path = make_path("runtime_interrupt_render.py")
 	write_file(path, "# + {marimo}\n\nimport time\ntime.sleep(5)\n1")
@@ -1466,6 +1503,7 @@ local tests = {
 	test_runtime_errors_include_descriptive_stderr_context,
 	test_runtime_errors_show_multiple_definition_details,
 	test_run_current_cell_command_refreshes_output,
+	test_run_current_cell_does_not_recreate_unrelated_image_placements,
 	test_deactivation_clears_runtime_image_placements,
 	test_interrupt_clears_running_placeholder,
 }
