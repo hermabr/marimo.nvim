@@ -1160,6 +1160,38 @@ local function test_sync_buffer_interrupts_running_changed_cell_and_dependents()
 	end, "timed out waiting for interrupted sync to settle", 2000)
 end
 
+local function test_sync_buffer_marks_dependent_cells_stale_or_queued_before_rerun()
+	local path = make_path("runtime_sync_marks_dependents.py")
+	write_file(
+		path,
+		"# + {marimo}\n\nimport time\ndelay = 0.0\nx = 1\ntime.sleep(delay)\nx\n\n# +\n\ny = x + 1\ny"
+	)
+	edit(path)
+
+	vim.cmd("Marimo on")
+	vim.cmd("MarimoRunAll")
+	wait_for_match(" 1")
+	wait_for_match(" 2")
+
+	vim.api.nvim_buf_set_lines(0, 3, 5, false, {
+		"delay = 1.5",
+		"x = 7",
+	})
+	require("marimo").sync_buffer(0)
+
+	wait_for_truthy(function()
+		local cells = vim.b.marimo_cells or {}
+		local second_runtime = cells[2] and cells[2].runtime or {}
+		return second_runtime.stale_inputs == true or second_runtime.status == "queued"
+	end, "timed out waiting for dependent cell to be marked stale or queued", 1000)
+
+	wait_for_match(" 8", 7000)
+	wait_for_truthy(function()
+		local lines = table.concat(rendered_lines(), "\n")
+		return not lines:match("marimo queued") and not lines:match("marimo running")
+	end, "timed out waiting for dependent rerun to settle", 7000)
+end
+
 local function test_sync_buffer_recovers_after_syntax_error()
 	local path = make_path("runtime_syntax_recovery.py")
 	write_file(path, "# + {marimo}\n\nn = 1\nprint(n)\nn\n\n# +\n\nm = n + 1\nm")
@@ -1525,6 +1557,7 @@ local tests = {
 	test_sync_buffer_does_not_rerun_unrelated_lower_cells,
 	test_sync_buffer_clears_stale_cell_output_while_rerunning,
 	test_sync_buffer_interrupts_running_changed_cell_and_dependents,
+	test_sync_buffer_marks_dependent_cells_stale_or_queued_before_rerun,
 	test_sync_buffer_recovers_after_syntax_error,
 	test_reentering_reprojects_after_raw_reload,
 	test_reentering_buffer_does_not_rerun_runtime,
