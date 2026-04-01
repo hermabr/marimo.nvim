@@ -255,8 +255,8 @@ local function mark_cells_pending(bufnr, cell_ids)
 		local next_runtime = vim.deepcopy(runtime_cells[cell_id] or {})
 		next_runtime.status = next_runtime.status == "running" and "running" or "queued"
 		next_runtime.stale_inputs = false
-		next_runtime.output = next_runtime.output or nil
-		next_runtime.console = next_runtime.console or {}
+		next_runtime.output = nil
+		next_runtime.console = {}
 		runtime_cells[cell_id] = next_runtime
 	end
 	vim.b[bufnr].marimo_runtime_cells = runtime_cells

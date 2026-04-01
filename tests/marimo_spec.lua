@@ -1033,6 +1033,41 @@ local function test_sync_buffer_updates_reactive_outputs()
 	assert_matches(lines, " 4")
 end
 
+local function test_sync_buffer_clears_stale_cell_output_while_rerunning()
+	local path = make_path("runtime_sync_clears_stale.py")
+	write_file(
+		path,
+		"# + {marimo}\n\nimport time\ndelay = 0.0\nn = 1\ntime.sleep(delay)\nprint(f\"n={n}\")\nn"
+	)
+	edit(path)
+
+	vim.cmd("Marimo on")
+	vim.cmd("MarimoRunAll")
+	wait_for_match(" 1")
+	wait_for_match(" n=1")
+
+	vim.api.nvim_buf_set_lines(0, 3, 5, false, {
+		"delay = 2.0",
+		"n = 7",
+	})
+	require("marimo").sync_buffer(0)
+
+	wait_for_truthy(function()
+		local lines = table.concat(rendered_lines(), "\n")
+		return lines:match("marimo queued") ~= nil or lines:match("marimo running") ~= nil
+	end, "timed out waiting for rerun placeholder")
+
+	local pending_lines = table.concat(rendered_lines(), "\n")
+	assert_truthy(not pending_lines:match(" 1"), "expected stale output to clear while rerunning")
+	assert_truthy(not pending_lines:match(" n=1"), "expected stale stdout to clear while rerunning")
+
+	wait_for_match(" 7", 7000)
+	wait_for_match(" n=7", 7000)
+
+	local final_lines = table.concat(rendered_lines(), "\n")
+	assert_truthy(not final_lines:match(" n=1"), "expected old stdout to stay cleared after rerun")
+end
+
 local function test_reentering_reprojects_after_raw_reload()
 	local path = make_path("reenter_reload.py")
 	local other = make_path("reenter_other.py")
@@ -1319,6 +1354,7 @@ local tests = {
 	test_new_cell_autorun_streams_runtime_updates,
 	test_opening_without_running_does_not_render_idle_placeholders,
 	test_sync_buffer_updates_reactive_outputs,
+	test_sync_buffer_clears_stale_cell_output_while_rerunning,
 	test_reentering_reprojects_after_raw_reload,
 	test_reentering_buffer_does_not_rerun_runtime,
 	test_runtime_outputs_include_stdout,
