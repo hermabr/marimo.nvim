@@ -11,6 +11,8 @@ Marimo.nvim is a minimal plugin for editing marimo notebooks inside neovim.
 
 This repository is a VERY EARLY WIP. Proposing sweeping changes that improve long-term maintainability is encouraged.
 
+Marimo.nvim contains the lua/neovim frontend and a very thin python bridge that communicates with the raw marimo kernel, similar to the web ui and marimo-lsp. The marimo source code is available at ~/dev/git/marimo.
+
 ## Core Priorities
 
 1. Performance first.
