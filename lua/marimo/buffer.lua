@@ -288,6 +288,34 @@ local function mark_cells_pending(bufnr, cell_ids)
 	})
 end
 
+local function mark_cells_locally_queued(bufnr, cell_ids)
+	local runtime_cells = vim.b[bufnr].marimo_runtime_cells or {}
+	local changed_ids = {}
+	for _, cell_id in ipairs(cell_ids or {}) do
+		local next_runtime = vim.deepcopy(runtime_cells[cell_id] or {})
+		local updated = false
+		if next_runtime.status ~= "running" and next_runtime.status ~= "queued" then
+			next_runtime.status = "queued"
+			updated = true
+		end
+		if next_runtime.stale_inputs == true then
+			next_runtime.stale_inputs = false
+			updated = true
+		end
+		if updated then
+			runtime_cells[cell_id] = next_runtime
+			table.insert(changed_ids, cell_id)
+		end
+	end
+	if #changed_ids == 0 then
+		return
+	end
+	vim.b[bufnr].marimo_runtime_cells = runtime_cells
+	refresh_cells(bufnr, {
+		changed_ids = changed_ids,
+	})
+end
+
 local function clear_running_runtime_state(bufnr)
 	local runtime_cells, changed, changed_ids = runtime.apply_operation(vim.b[bufnr].marimo_runtime_cells or {}, {
 		op = "interrupted",
@@ -554,6 +582,9 @@ queue_runtime_run = function(bufnr, snapshot, cell_ids, codes)
 		pending_cell_ids = vim.deepcopy(cell_ids),
 		error_prefix = "failed to run marimo cells: ",
 	}
+	if entry.runtime_request ~= nil or entry.pending_sync ~= nil or entry.interrupt_in_flight ~= nil then
+		mark_cells_locally_queued(bufnr, cell_ids)
+	end
 	flush_runtime_queue(bufnr)
 end
 
