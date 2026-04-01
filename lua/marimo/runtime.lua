@@ -48,6 +48,21 @@ local function merge_consecutive_console(console)
 	return merged
 end
 
+local function clear_pending_statuses(runtime_by_id)
+	local changed_ids = {}
+	for cell_id, runtime in pairs(runtime_by_id) do
+		if runtime.status == "queued" or runtime.status == "running" then
+			runtime.status = "idle"
+			runtime._running_timestamp = nil
+			table.insert(changed_ids, cell_id)
+		end
+	end
+	if #changed_ids == 0 then
+		return runtime_by_id, false, nil
+	end
+	return runtime_by_id, true, changed_ids
+end
+
 function M.apply_operation(runtime_by_id, operation)
 	if type(operation) ~= "table" then
 		return runtime_by_id, false, nil
@@ -88,19 +103,11 @@ function M.apply_operation(runtime_by_id, operation)
 		runtime_by_id[cell_id] = next_runtime
 		return runtime_by_id, true, { cell_id }
 	end
+	if op == "completed-run" then
+		return clear_pending_statuses(runtime_by_id)
+	end
 	if op == "interrupted" then
-		local changed_ids = {}
-		for cell_id, runtime in pairs(runtime_by_id) do
-			if runtime.status == "queued" or runtime.status == "running" then
-				runtime.status = "idle"
-				runtime._running_timestamp = nil
-				table.insert(changed_ids, cell_id)
-			end
-		end
-		if #changed_ids == 0 then
-			return runtime_by_id, false, nil
-		end
-		return runtime_by_id, true, changed_ids
+		return clear_pending_statuses(runtime_by_id)
 	end
 	return runtime_by_id, false, nil
 end
