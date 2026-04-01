@@ -1055,6 +1055,44 @@ local function test_sync_buffer_updates_reactive_outputs()
 	assert_matches(lines, " 4")
 end
 
+local function test_sync_buffer_does_not_rerun_unrelated_lower_cells()
+	local path = make_path("runtime_sync_unrelated.py")
+	local counter_path = make_path("runtime_sync_unrelated_counter.txt")
+	write_file(
+		path,
+		string.format(
+			"# + {marimo}\n\nn = 2\nn\n\n# +\n\nfrom pathlib import Path\ncounter_path = Path(%q)\ncounter = int(counter_path.read_text()) if counter_path.exists() else 0\ncounter_path.write_text(str(counter + 1))\ncounter + 1",
+			counter_path
+		)
+	)
+	edit(path)
+
+	vim.cmd("Marimo on")
+	vim.cmd("MarimoRunAll")
+	wait_for_truthy(function()
+		local cells = vim.b.marimo_cells or {}
+		return cells[2]
+			and cells[2].runtime
+			and cells[2].runtime.output
+			and cells[2].runtime.output.data ~= nil
+	end, "timed out waiting for unrelated cell output")
+
+	local output_before = vim.b.marimo_cells[2].runtime.output.data
+
+	vim.api.nvim_buf_set_lines(0, 2, 3, false, { "n = 3" })
+	require("marimo").sync_buffer(0)
+
+	wait_for_match(" 3")
+	wait_for_truthy(function()
+		local cells = vim.b.marimo_cells or {}
+		local second_runtime = cells[2] and cells[2].runtime or {}
+		return second_runtime.status ~= "queued"
+			and second_runtime.status ~= "running"
+	end, "timed out waiting for unrelated sync to settle")
+
+	assert_eq(vim.b.marimo_cells[2].runtime.output.data, output_before)
+end
+
 local function test_sync_buffer_clears_stale_cell_output_while_rerunning()
 	local path = make_path("runtime_sync_clears_stale.py")
 	write_file(
@@ -1415,6 +1453,7 @@ local tests = {
 	test_new_cell_autorun_streams_runtime_updates,
 	test_opening_without_running_does_not_render_idle_placeholders,
 	test_sync_buffer_updates_reactive_outputs,
+	test_sync_buffer_does_not_rerun_unrelated_lower_cells,
 	test_sync_buffer_clears_stale_cell_output_while_rerunning,
 	test_sync_buffer_recovers_after_syntax_error,
 	test_reentering_reprojects_after_raw_reload,
