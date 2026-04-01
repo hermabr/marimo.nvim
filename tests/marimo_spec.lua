@@ -1128,6 +1128,38 @@ local function test_sync_buffer_clears_stale_cell_output_while_rerunning()
 	assert_truthy(not final_lines:match(" n=1"), "expected old stdout to stay cleared after rerun")
 end
 
+local function test_sync_buffer_interrupts_running_changed_cell_and_dependents()
+	local path = make_path("runtime_sync_interrupts_dependents.py")
+	write_file(
+		path,
+		"# + {marimo}\n\nimport time\ndelay = 4.0\nx = 1\ntime.sleep(delay)\nx\n\n# +\n\ny = x + 1\ny"
+	)
+	edit(path)
+
+	vim.cmd("Marimo on")
+	vim.cmd("MarimoRunAll")
+	wait_for_truthy(function()
+		local lines = table.concat(rendered_lines(), "\n")
+		return lines:match("marimo queued") ~= nil or lines:match("marimo running") ~= nil
+	end, "timed out waiting for running placeholder")
+
+	local started = vim.uv.hrtime()
+	vim.api.nvim_buf_set_lines(0, 3, 5, false, {
+		"delay = 0.0",
+		"x = 7",
+	})
+	require("marimo").sync_buffer(0)
+	local elapsed_ms = (vim.uv.hrtime() - started) / 1000000
+	assert_truthy(elapsed_ms < 1000, "expected sync_buffer to return without waiting for interruption")
+
+	wait_for_match(" 7", 2000)
+	wait_for_match(" 8", 2000)
+	wait_for_truthy(function()
+		local lines = table.concat(rendered_lines(), "\n")
+		return not lines:match("marimo queued") and not lines:match("marimo running")
+	end, "timed out waiting for interrupted sync to settle", 2000)
+end
+
 local function test_sync_buffer_recovers_after_syntax_error()
 	local path = make_path("runtime_syntax_recovery.py")
 	write_file(path, "# + {marimo}\n\nn = 1\nprint(n)\nn\n\n# +\n\nm = n + 1\nm")
@@ -1455,6 +1487,7 @@ local tests = {
 	test_sync_buffer_updates_reactive_outputs,
 	test_sync_buffer_does_not_rerun_unrelated_lower_cells,
 	test_sync_buffer_clears_stale_cell_output_while_rerunning,
+	test_sync_buffer_interrupts_running_changed_cell_and_dependents,
 	test_sync_buffer_recovers_after_syntax_error,
 	test_reentering_reprojects_after_raw_reload,
 	test_reentering_buffer_does_not_rerun_runtime,

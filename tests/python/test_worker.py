@@ -95,6 +95,40 @@ def test_serialize_notebook_returns_canonical_source_and_ranges(tmp_path: Path) 
     assert serialized["canonical_ranges"][0]["start_line"] > 0
 
 
+def test_resolve_changed_dependents_returns_transitive_descendants(tmp_path: Path) -> None:
+    worker = Worker()
+    snapshot = build_snapshot(tmp_path / "dependents.py")
+    snapshot["cells"] = [
+        {
+            "id": "cell-1",
+            "name": "_",
+            "code": "x = 1\nx",
+            "options": {},
+        },
+        {
+            "id": "cell-2",
+            "name": "_",
+            "code": "y = x + 1\ny",
+            "options": {},
+        },
+        {
+            "id": "cell-3",
+            "name": "_",
+            "code": "z = y + 1\nz",
+            "options": {},
+        },
+    ]
+
+    result = worker.resolve_changed_dependents(
+        {
+            "snapshot": snapshot,
+            "cell_ids": ["cell-1"],
+        }
+    )
+
+    assert result == {"cell_ids": ["cell-2", "cell-3"]}
+
+
 def test_kernel_bridge_uses_uv_with_marimo(monkeypatch: Any, tmp_path: Path) -> None:
     snapshot = NotebookSnapshot.from_dict(build_snapshot(tmp_path / "worker.py"))
     captured: dict[str, Any] = {}
@@ -217,6 +251,59 @@ def test_worker_run_cells_returns_before_slow_cell_finishes(tmp_path: Path) -> N
     assert result == {"session_id": snapshot["session_id"], "submitted": True}
     assert elapsed < 1.0
     wait_for_truthy(lambda: any(event.get("operation", {}).get("op") == "completed-run" for event in events))
+    worker.shutdown({})
+
+
+def test_worker_sync_notebook_runs_fresh_code_after_interrupt(tmp_path: Path) -> None:
+    events: list[dict[str, Any]] = []
+    worker = Worker(event_sink=events.append)
+    path = tmp_path / "interrupt_then_sync.py"
+    slow_snapshot = build_snapshot(path, "import time\ntime.sleep(2.0)\n1")
+
+    worker.run_cells(
+        {
+            "snapshot": slow_snapshot,
+            "cell_ids": ["cell-1"],
+            "codes": ["import time\ntime.sleep(2.0)\n1"],
+            "_request_id": 19,
+        }
+    )
+    wait_for_truthy(
+        lambda: any(
+            event.get("operation", {}).get("op") == "cell-op"
+            and event.get("operation", {}).get("status") in {"queued", "running"}
+            for event in events
+        )
+    )
+
+    interrupt_result = worker.interrupt(
+        {
+            "session_id": slow_snapshot["session_id"],
+            "cancel_request_id": 19,
+            "_request_id": 20,
+        }
+    )
+    assert interrupt_result == {"session_id": slow_snapshot["session_id"], "interrupted": True}
+
+    fresh_snapshot = build_snapshot(path, "x = 7\nx")
+    sync_result = worker.sync_notebook(
+        {
+            "snapshot": fresh_snapshot,
+            "run_ids": ["cell-1"],
+            "delete_ids": [],
+            "_request_id": 21,
+        }
+    )
+
+    assert sync_result == {"session_id": fresh_snapshot["session_id"], "synced": True}
+    wait_for_truthy(
+        lambda: any(
+            output_text(event["operation"]) == "7"
+            for event in events
+            if event.get("operation", {}).get("op") == "cell-op"
+            and event.get("request_id") == 21
+        )
+    )
     worker.shutdown({})
 
 
