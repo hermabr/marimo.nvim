@@ -748,6 +748,25 @@ local function find_floating_window()
 	return nil
 end
 
+local function floating_window_title(winid)
+	local title = vim.api.nvim_win_get_config(winid).title
+	if type(title) == "string" then
+		return title
+	end
+	if type(title) ~= "table" then
+		return ""
+	end
+	local chunks = {}
+	for _, chunk in ipairs(title) do
+		if type(chunk) == "string" then
+			table.insert(chunks, chunk)
+		elseif type(chunk) == "table" and chunk[1] ~= nil then
+			table.insert(chunks, tostring(chunk[1]))
+		end
+	end
+	return table.concat(chunks, "")
+end
+
 local function test_output_keymap_opens_scrollable_float()
 	local path = make_path("output_keymap.py")
 	write_file(path, '# + {marimo}\n\nprint("\\n".join(str(i) for i in range(80)))')
@@ -807,6 +826,53 @@ local function test_marimo_output_command_opens_current_cell_output()
 	local second_lines = vim.api.nvim_buf_get_lines(vim.api.nvim_win_get_buf(second_win), 0, -1, false)
 	assert_eq(second_lines[1], "goodbye")
 	vim.api.nvim_win_close(second_win, true)
+end
+
+local function test_marimo_output_title_shows_last_runtime()
+	local path = make_path("output_runtime_last.py")
+	write_file(path, '# + {marimo}\n\nimport time\ntime.sleep(0.2)\nprint("hello")')
+	edit(path)
+
+	vim.cmd("Marimo on")
+	vim.cmd("MarimoRunAll")
+	wait_for_match(" hello")
+
+	vim.api.nvim_win_set_cursor(0, { 3, 0 })
+	vim.cmd("MarimoOutput")
+	local winid = find_floating_window()
+	assert_truthy(winid ~= nil, "expected output float for runtime title test")
+	assert_matches(floating_window_title(winid), "took [0-9]", "expected completed runtime in output title")
+end
+
+local function test_marimo_output_title_updates_current_runtime_while_running()
+	local path = make_path("output_runtime_running.py")
+	write_file(path, '# + {marimo}\n\nimport time\ntime.sleep(5.0)\nprint("hello")')
+	edit(path)
+
+	vim.cmd("Marimo on")
+	vim.cmd("MarimoRunAll")
+	wait_for_truthy(function()
+		local lines = table.concat(rendered_lines(), "\n")
+		return lines:match("marimo queued") ~= nil or lines:match("marimo running") ~= nil
+	end, "timed out waiting for running cell before opening output")
+
+	vim.api.nvim_win_set_cursor(0, { 3, 0 })
+	vim.cmd("MarimoOutput")
+	local winid = find_floating_window()
+	assert_truthy(winid ~= nil, "expected output float for running runtime title test")
+	wait_for_truthy(function()
+		return floating_window_title(winid):match("runtime [0-9]") ~= nil
+	end, "timed out waiting for live runtime in output title")
+	local initial_title = floating_window_title(winid)
+	wait_for_truthy(function()
+		return floating_window_title(winid) ~= initial_title
+	end, "timed out waiting for output runtime title to refresh", 1500)
+
+	vim.cmd("MarimoInterrupt")
+	wait_for_truthy(function()
+		local lines = table.concat(rendered_lines(), "\n")
+		return not lines:match("marimo queued") and not lines:match("marimo running")
+	end, "timed out waiting for runtime title test interrupt", 5000)
 end
 
 local function test_marimo_output_preserves_relative_numbers_and_wraps_lines()
@@ -1661,6 +1727,8 @@ local tests = {
 	test_toggle_disabled_keymap_updates_marker_and_runtime_status,
 	test_output_keymap_opens_scrollable_float,
 	test_marimo_output_command_opens_current_cell_output,
+	test_marimo_output_title_shows_last_runtime,
+	test_marimo_output_title_updates_current_runtime_while_running,
 	test_marimo_output_preserves_relative_numbers_and_wraps_lines,
 	test_marimo_output_renders_images_in_float,
 	test_jump_next_cell_appends_new_cell_and_enters_insert_mode,

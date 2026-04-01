@@ -1,4 +1,5 @@
 local M = {}
+local uv = vim.uv or vim.loop
 
 local function is_nil_like(value)
 	return value == nil or value == vim.NIL
@@ -11,6 +12,7 @@ local function default_runtime()
 		output = nil,
 		console = {},
 		last_execution_time_ms = nil,
+		_running_started_at_ns = nil,
 	}
 end
 
@@ -54,6 +56,7 @@ local function clear_pending_statuses(runtime_by_id)
 		if runtime.status == "queued" or runtime.status == "running" then
 			runtime.status = "idle"
 			runtime._running_timestamp = nil
+			runtime._running_started_at_ns = nil
 			table.insert(changed_ids, cell_id)
 		end
 	end
@@ -80,14 +83,26 @@ function M.apply_operation(runtime_by_id, operation)
 			if next_status == "running" and previous.status == "queued" then
 				next_runtime.console = {}
 			end
-			if previous.status == "running" and next_status == "idle" then
-				local previous_timestamp = previous._running_timestamp or operation.timestamp
-				if previous_timestamp and operation.timestamp then
-					next_runtime.last_execution_time_ms = math.floor(math.max(operation.timestamp - previous_timestamp, 0) * 1000)
+			if previous.status == "running" and next_status ~= "running" then
+				if next_status == "idle" then
+					local previous_timestamp = previous._running_timestamp or operation.timestamp
+					if previous_timestamp and operation.timestamp then
+						next_runtime.last_execution_time_ms =
+							math.floor(math.max(operation.timestamp - previous_timestamp, 0) * 1000)
+					elseif type(previous._running_started_at_ns) == "number" and uv and type(uv.hrtime) == "function" then
+						next_runtime.last_execution_time_ms =
+							math.floor(math.max((uv.hrtime() - previous._running_started_at_ns) / 1000000, 0))
+					end
 				end
 				next_runtime._running_timestamp = nil
+				next_runtime._running_started_at_ns = nil
 			elseif next_status == "running" then
 				next_runtime._running_timestamp = previous._running_timestamp or operation.timestamp
+				if type(previous._running_started_at_ns) == "number" then
+					next_runtime._running_started_at_ns = previous._running_started_at_ns
+				elseif uv and type(uv.hrtime) == "function" then
+					next_runtime._running_started_at_ns = uv.hrtime()
+				end
 			end
 			next_runtime.status = next_status
 		end

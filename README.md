@@ -84,7 +84,7 @@ require("marimo").setup({
 })
 ```
 
-`<leader>mo` opens the current cell's output in a larger floating window you can scroll with normal motions. If `snacks.image` is available, image outputs render there too.
+`<leader>mo` opens the current cell's output in a larger floating window you can scroll with normal motions. The float title shows the live runtime for a running cell, or how long it took after it finishes. If `snacks.image` is available, image outputs render there too.
 
 ## Test
 

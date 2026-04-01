@@ -6,9 +6,13 @@ local output = dofile(dir .. "/output.lua")
 local util = dofile(dir .. "/util.lua")
 
 local M = {}
+local uv = vim.uv or vim.loop
 
 local highlight_namespace = vim.api.nvim_create_namespace("marimo.nvim.output_window")
 local window_state = {}
+local runtime_refresh_interval_ms = 200
+local centered_float_config
+local find_cell_by_id
 
 local function state_for(bufnr)
 	window_state[bufnr] = window_state[bufnr] or {}
@@ -31,7 +35,135 @@ local function close_buffer(bufnr)
 	end
 end
 
-local function find_cell_by_id(bufnr, cell_id)
+local function runtime_for_cell(bufnr, cell)
+	if not cell then
+		return {}
+	end
+	local runtime_by_id = vim.b[bufnr].marimo_runtime_cells or {}
+	return runtime_by_id[cell.id] or cell.runtime or {}
+end
+
+local function format_duration(ms)
+	if type(ms) ~= "number" then
+		return nil
+	end
+	local rounded_ms = math.max(math.floor(ms + 0.5), 0)
+	if rounded_ms < 1000 then
+		return string.format("%dms", rounded_ms)
+	end
+	if rounded_ms < 10000 then
+		return string.format("%.2fs", rounded_ms / 1000)
+	end
+	if rounded_ms < 60000 then
+		return string.format("%.1fs", rounded_ms / 1000)
+	end
+	local total_seconds = math.floor((rounded_ms + 500) / 1000)
+	local minutes = math.floor(total_seconds / 60)
+	local seconds = total_seconds % 60
+	if minutes < 60 then
+		return string.format("%dm %02ds", minutes, seconds)
+	end
+	local hours = math.floor(minutes / 60)
+	minutes = minutes % 60
+	return string.format("%dh %02dm", hours, minutes)
+end
+
+local function runtime_title_fragment(runtime)
+	runtime = runtime or {}
+	if runtime.status == "running" and type(runtime._running_started_at_ns) == "number" and uv and type(uv.hrtime) == "function" then
+		local elapsed_ms = math.max((uv.hrtime() - runtime._running_started_at_ns) / 1000000, 0)
+		local formatted = format_duration(elapsed_ms)
+		if formatted then
+			return "runtime " .. formatted, true
+		end
+		return nil, true
+	end
+	if runtime.status == "queued" then
+		return nil, false
+	end
+	if type(runtime.last_execution_time_ms) == "number" then
+		local formatted = format_duration(runtime.last_execution_time_ms)
+		if formatted then
+			return "took " .. formatted, false
+		end
+	end
+	return nil, false
+end
+
+local function build_window_title(cell, runtime)
+	local title = " marimo output "
+	local runtime_title, is_running = runtime_title_fragment(runtime)
+	if runtime_title then
+		title = string.format(" marimo output | %s ", runtime_title)
+	end
+	return title, is_running
+end
+
+local function apply_window_title(entry, cell, runtime)
+	if not entry or not entry.winid or not vim.api.nvim_win_is_valid(entry.winid) then
+		return false
+	end
+	local title, is_running = build_window_title(cell, runtime)
+	if entry.title ~= title then
+		entry.title = title
+		pcall(vim.api.nvim_win_set_config, entry.winid, {
+			title = title,
+			title_pos = "center",
+		})
+	end
+	return is_running
+end
+
+local function stop_runtime_timer(entry)
+	if not entry or not entry.runtime_timer then
+		return
+	end
+	local timer = entry.runtime_timer
+	entry.runtime_timer = nil
+	pcall(function()
+		timer:stop()
+	end)
+	pcall(function()
+		timer:close()
+	end)
+end
+
+local function sync_runtime_timer(source_bufnr, entry, cell, runtime)
+	local is_running = apply_window_title(entry, cell, runtime)
+	if not is_running or not uv or type(uv.new_timer) ~= "function" then
+		stop_runtime_timer(entry)
+		return
+	end
+	if entry.runtime_timer then
+		return
+	end
+	local timer = uv.new_timer()
+	if not timer then
+		return
+	end
+	entry.runtime_timer = timer
+	timer:start(runtime_refresh_interval_ms, runtime_refresh_interval_ms, vim.schedule_wrap(function()
+		if window_state[source_bufnr] ~= entry then
+			stop_runtime_timer(entry)
+			return
+		end
+		if not vim.api.nvim_buf_is_valid(source_bufnr) or not entry.winid or not vim.api.nvim_win_is_valid(entry.winid) then
+			stop_runtime_timer(entry)
+			return
+		end
+		local current_cell = find_cell_by_id(source_bufnr, entry.cell_id)
+		if not current_cell then
+			stop_runtime_timer(entry)
+			return
+		end
+		local current_runtime = runtime_for_cell(source_bufnr, current_cell)
+		if not apply_window_title(entry, current_cell, current_runtime) then
+			stop_runtime_timer(entry)
+		end
+	end))
+end
+
+find_cell_by_id = function(bufnr, cell_id)
 	for _, cell in ipairs(vim.b[bufnr].marimo_cells or {}) do
 		if cell.id == cell_id then
 			return cell
@@ -44,8 +176,7 @@ local function cell_display(bufnr, cell)
 	if not cell then
 		return nil
 	end
-	local runtime_by_id = vim.b[bufnr].marimo_runtime_cells or {}
-	local runtime = runtime_by_id[cell.id] or cell.runtime or {}
+	local runtime = runtime_for_cell(bufnr, cell)
 	local output_image = images.extract_output_image(runtime.output)
 	local console_image = images.extract_console_image(runtime.console)
 	local render_images = images.supports_images()
@@ -100,7 +231,7 @@ local function apply_lines(bufnr, lines)
 	vim.bo[bufnr].modified = false
 end
 
-local function centered_float_config()
+centered_float_config = function()
 	local width = math.max(math.min(math.floor(vim.o.columns * 0.8), vim.o.columns - 4), 40)
 	local height = math.max(math.min(math.floor(vim.o.lines * 0.8), vim.o.lines - 4), 8)
 	local row = math.max(math.floor((vim.o.lines - height) / 2) - 1, 0)
@@ -170,6 +301,7 @@ local function attach_cleanup_autocmd(source_bufnr, float_bufnr)
 			if not entry or entry.float_bufnr ~= float_bufnr then
 				return
 			end
+			stop_runtime_timer(entry)
 			images.close_placements(entry)
 			clear_state(source_bufnr)
 		end,
@@ -229,7 +361,7 @@ local function place_entry_images(entry, display)
 	end
 end
 
-local function update_entry(entry, cell, display, preserve_view)
+local function update_entry(source_bufnr, entry, cell, display, preserve_view)
 	local view = nil
 	if preserve_view and vim.api.nvim_win_is_valid(entry.winid) then
 		view = vim.api.nvim_win_call(entry.winid, vim.fn.winsaveview)
@@ -246,9 +378,8 @@ local function update_entry(entry, cell, display, preserve_view)
 			vim.cmd("silent! normal! zt")
 		end)
 	end
-	local title = string.format(" marimo output %s ", tostring(cell.id))
-	pcall(vim.api.nvim_win_set_config, entry.winid, vim.tbl_extend("force", centered_float_config(), { title = title, title_pos = "center" }))
 	configure_window(entry.winid, entry.window_opts)
+	sync_runtime_timer(source_bufnr, entry, cell, runtime_for_cell(source_bufnr, cell))
 	return true
 end
 
@@ -268,7 +399,7 @@ function M.refresh(bufnr)
 		M.close(bufnr)
 		return
 	end
-	return update_entry(entry, cell, display, true)
+	return update_entry(bufnr, entry, cell, display, true)
 end
 
 function M.open_current(bufnr)
@@ -288,7 +419,7 @@ function M.open_current(bufnr)
 		return false
 	end
 	local entry = ensure_entry(bufnr, cell, vim.api.nvim_get_current_win())
-	return update_entry(entry, cell, display, false)
+	return update_entry(bufnr, entry, cell, display, false)
 end
 
 function M.close(bufnr)
@@ -299,6 +430,7 @@ function M.close(bufnr)
 	end
 	local winid = entry.winid
 	local float_bufnr = entry.float_bufnr
+	stop_runtime_timer(entry)
 	images.close_placements(entry)
 	clear_state(bufnr)
 	close_window(winid)
