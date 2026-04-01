@@ -73,7 +73,14 @@ local function stop_autorun_timer(bufnr)
 end
 
 local function runtime_started(bufnr)
-	return vim.b[bufnr].marimo_runtime_enabled == true
+	if vim.b[bufnr].marimo_runtime_enabled == true then
+		return true
+	end
+	if next(vim.b[bufnr].marimo_runtime_cells or {}) ~= nil then
+		return true
+	end
+	local entry = state_for(bufnr)
+	return entry.runtime_request ~= nil or entry.pending_sync ~= nil or entry.pending_run ~= nil
 end
 
 local function runtime_metadata(bufnr)
@@ -315,6 +322,7 @@ local function handle_runtime_event(bufnr, request_id, event)
 	if type(event) ~= "table" or event.event ~= "operation" then
 		return
 	end
+	vim.b[bufnr].marimo_runtime_enabled = true
 	local active = state_for(bufnr).runtime_request
 	if request_id and (not active or active.request_id ~= request_id) then
 		return
@@ -509,20 +517,9 @@ local function autorun_ids_for_changes(snapshot, changed_ids)
 	for _, cell_id in ipairs(changed_ids or {}) do
 		changed_lookup[cell_id] = true
 	end
-	local first_changed_index = nil
-	for idx, cell in ipairs(snapshot.cells or {}) do
-		if changed_lookup[cell.id] then
-			first_changed_index = idx
-			break
-		end
-	end
-	if first_changed_index == nil then
-		return {}
-	end
 	local run_ids = {}
-	for idx = first_changed_index, #(snapshot.cells or {}) do
-		local cell = snapshot.cells[idx]
-		if not (cell.options or {}).disabled then
+	for _, cell in ipairs(snapshot.cells or {}) do
+		if changed_lookup[cell.id] and not (cell.options or {}).disabled then
 			table.insert(run_ids, cell.id)
 		end
 	end
@@ -767,7 +764,7 @@ function M.sync_buffer(bufnr, opts)
 	local run_ids = should_autorun and autorun_ids_for_changes(synced_snapshot, changed_ids) or {}
 	if ((runtime_started(bufnr) or opts.start_runtime) and (#changed_ids > 0 or #deleted_ids > 0 or opts.start_runtime)) then
 		queue_runtime_sync(bufnr, synced_snapshot, run_ids, deleted_ids)
-		if runtime_started(bufnr) and #run_ids > 0 then
+		if runtime_started(bufnr) and (#changed_ids > 0 or #deleted_ids > 0) then
 			schedule_stale_followup(bufnr, synced_snapshot)
 		end
 	elseif #run_ids > 0 then
@@ -843,9 +840,7 @@ function M.schedule_sync(bufnr, opts)
 			end
 			if runtime_started(bufnr) and (#changed_ids > 0 or #deleted_ids > 0) then
 				queue_runtime_sync(bufnr, synced_snapshot, run_ids, deleted_ids)
-				if #run_ids > 0 then
-					schedule_stale_followup(bufnr, synced_snapshot)
-				end
+				schedule_stale_followup(bufnr, synced_snapshot)
 			elseif #run_ids > 0 then
 				queue_runtime_run(bufnr, synced_snapshot, run_ids, codes_for_cell_ids(synced_snapshot, run_ids))
 			end
