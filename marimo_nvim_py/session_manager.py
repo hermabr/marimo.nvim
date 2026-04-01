@@ -6,8 +6,9 @@ from marimo._ast.compiler import compile_cell
 from marimo._runtime.dataflow.graph import DirectedGraph
 from marimo._types.ids import CellId_t
 
+from marimo_nvim_py.cell_changes import resolve_runtime_updates
 from marimo_nvim_py.codec import load_raw_notebook, serialize_notebook
-from marimo_nvim_py.models import NotebookSnapshot
+from marimo_nvim_py.models import NotebookSnapshot, SnapshotCell
 from marimo_nvim_py.session import BridgeSession
 
 
@@ -69,6 +70,25 @@ class Worker:
 
         ordered_ids = [cell.id for cell in snapshot.cells if cell.id in dependent_ids]
         return {"cell_ids": ordered_ids}
+
+    def resolve_runtime_updates(self, params: dict[str, Any]) -> dict[str, Any]:
+        snapshot = NotebookSnapshot.from_dict(dict(params["snapshot"]))
+        previous_cells = [
+            SnapshotCell.from_dict(cell)
+            for cell in list(params.get("previous_cells") or [])
+        ]
+        raw_changed_ids = {
+            str(cell_id) for cell_id in list(params.get("cell_ids") or [])
+        }
+        changed_ids, dependent_ids = resolve_runtime_updates(
+            snapshot,
+            previous_cells,
+            raw_changed_ids,
+        )
+        return {
+            "changed_ids": changed_ids,
+            "dependent_ids": dependent_ids,
+        }
 
     def ensure_session(self, params: dict[str, Any]) -> dict[str, Any]:
         snapshot = NotebookSnapshot.from_dict(dict(params["snapshot"]))

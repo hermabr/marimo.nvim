@@ -1279,6 +1279,63 @@ local function test_sync_buffer_does_not_rerun_unrelated_lower_cells()
 	assert_eq(vim.b.marimo_cells[2].runtime.output.data, output_before)
 end
 
+local function test_sync_buffer_skips_rerun_for_comment_only_cell_changes()
+	local path = make_path("runtime_sync_comment_only.py")
+	local first_counter_path = make_path("runtime_sync_comment_only_first.txt")
+	local second_counter_path = make_path("runtime_sync_comment_only_second.txt")
+	write_file(
+		path,
+		string.format(
+			"# + {marimo}\n\nfrom pathlib import Path as FirstPath\nfirst_counter_path = FirstPath(%q)\nfirst_counter = int(first_counter_path.read_text()) if first_counter_path.exists() else 0\nfirst_counter_path.write_text(str(first_counter + 1))\nn = 2\nn\n\n# +\n\nfrom pathlib import Path as SecondPath\nsecond_counter_path = SecondPath(%q)\nsecond_counter = int(second_counter_path.read_text()) if second_counter_path.exists() else 0\nsecond_counter_path.write_text(str(second_counter + 1))\ny = n + 1\ny",
+			first_counter_path,
+			second_counter_path
+		)
+	)
+	edit(path)
+
+	vim.cmd("Marimo on")
+	vim.cmd("MarimoRunAll")
+	wait_for_match(" 2")
+	wait_for_match(" 3")
+	wait_for_truthy(function()
+		return read_file(first_counter_path) == "1" and read_file(second_counter_path) == "1"
+	end, "timed out waiting for initial counters")
+
+	local extmarks_before = render_extmarks()
+	assert_eq(#extmarks_before, 2)
+
+	local target_row = nil
+	for idx, line in ipairs(vim.api.nvim_buf_get_lines(0, 0, -1, false)) do
+		if line == "n = 2" then
+			target_row = idx - 1
+			break
+		end
+	end
+	assert_truthy(target_row ~= nil, "expected to find first cell body")
+
+	vim.api.nvim_buf_set_lines(0, target_row, target_row, false, {
+		"# comment-only change",
+	})
+	require("marimo").sync_buffer(0)
+	vim.wait(400, function()
+		return false
+	end, 20)
+
+	assert_eq(read_file(first_counter_path), "1")
+	assert_eq(read_file(second_counter_path), "1")
+
+	local extmarks_after = render_extmarks()
+	assert_eq(#extmarks_after, 2)
+	assert_eq(extmarks_after[1][2], extmarks_before[1][2] + 1)
+	assert_eq(extmarks_after[2][2], extmarks_before[2][2] + 1)
+
+	local lines = table.concat(rendered_lines(), "\n")
+	assert_matches(lines, " 2")
+	assert_matches(lines, " 3")
+	assert_truthy(not lines:match("marimo queued"), "expected comment-only sync to avoid rerun placeholders")
+	assert_truthy(not lines:match("marimo running"), "expected comment-only sync to avoid rerun placeholders")
+end
+
 local function test_sync_buffer_clears_stale_cell_output_while_rerunning()
 	local path = make_path("runtime_sync_clears_stale.py")
 	write_file(
@@ -1747,6 +1804,7 @@ local tests = {
 	test_opening_without_running_does_not_render_idle_placeholders,
 	test_sync_buffer_updates_reactive_outputs,
 	test_sync_buffer_does_not_rerun_unrelated_lower_cells,
+	test_sync_buffer_skips_rerun_for_comment_only_cell_changes,
 	test_sync_buffer_clears_stale_cell_output_while_rerunning,
 	test_sync_buffer_interrupts_running_changed_cell_and_dependents,
 	test_sync_buffer_marks_dependent_cells_stale_or_queued_before_rerun,

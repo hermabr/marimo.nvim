@@ -32,6 +32,7 @@ def main() -> int:
         "load_raw_notebook": worker.load_raw_notebook,
         "serialize_notebook": worker.serialize_notebook,
         "resolve_changed_dependents": worker.resolve_changed_dependents,
+        "resolve_runtime_updates": worker.resolve_runtime_updates,
         "ensure_session": worker.ensure_session,
         "sync_notebook": worker.sync_notebook,
         "run_cells": worker.run_cells,
