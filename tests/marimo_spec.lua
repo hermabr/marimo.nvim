@@ -606,6 +606,25 @@ local function test_navigation_keymap_callbacks_work()
 	assert_eq(vim.api.nvim_win_get_cursor(0)[1], 7)
 end
 
+local function test_mode_toggle_keymap_callback_works()
+	local path = make_path("mode_toggle_keymap.py")
+	write_file(path, PLAIN_PYTHON)
+	edit(path)
+
+	vim.cmd("Marimo")
+	local toggle_map = vim.fn.maparg("<leader>mm", "n", false, true)
+	assert_truthy(type(toggle_map.callback) == "function", "expected <leader>mm callback")
+	assert_truthy(vim.b.marimo_projected)
+
+	toggle_map.callback()
+	assert_truthy(not vim.b.marimo_projected)
+	assert_eq(vim.api.nvim_buf_get_lines(0, 0, -1, false)[1], "x = 1")
+
+	toggle_map.callback()
+	assert_truthy(vim.b.marimo_projected)
+	assert_eq(vim.api.nvim_buf_get_lines(0, 0, 1, false)[1], "# + {marimo}")
+end
+
 local function test_run_current_cell_keymap_callback_works()
 	local path = make_path("run_current_keymap.py")
 	write_file(path, "# + {marimo}\n\nx = 1\nx")
@@ -634,6 +653,62 @@ local function test_run_all_cells_keymap_callback_works()
 
 	wait_for_match(" 1")
 	wait_for_match(" 2")
+end
+
+local function test_format_keymap_callback_works()
+	local path = make_path("format_keymap.py")
+	write_file(path, table.concat({
+		"# + {marimo}",
+		"",
+		"",
+		"x = 1",
+		"",
+		"# +",
+		"",
+		"",
+		"y = 2",
+	}, "\n"))
+	edit(path)
+
+	vim.cmd("Marimo on")
+	local format_map = vim.fn.maparg("<leader>mf", "n", false, true)
+	assert_truthy(type(format_map.callback) == "function", "expected <leader>mf callback")
+	format_map.callback()
+
+	assert_eq(
+		vim.inspect(vim.api.nvim_buf_get_lines(0, 0, -1, false)),
+		vim.inspect({
+			"# + {marimo}",
+			"",
+			"x = 1",
+			"",
+			"# +",
+			"",
+			"y = 2",
+		})
+	)
+end
+
+local function test_interrupt_keymap_callback_works()
+	local path = make_path("interrupt_keymap.py")
+	write_file(path, "# + {marimo}\n\nimport time\ntime.sleep(5)\n1")
+	edit(path)
+
+	vim.cmd("Marimo on")
+	vim.cmd("MarimoRunAll")
+	wait_for_truthy(function()
+		local lines = table.concat(rendered_lines(), "\n")
+		return lines:match("marimo queued") ~= nil or lines:match("marimo running") ~= nil
+	end, "timed out waiting for running placeholder")
+
+	local interrupt_map = vim.fn.maparg("<leader>mi", "n", false, true)
+	assert_truthy(type(interrupt_map.callback) == "function", "expected <leader>mi callback")
+	interrupt_map.callback()
+
+	wait_for_truthy(function()
+		local lines = table.concat(rendered_lines(), "\n")
+		return not lines:match("marimo queued") and not lines:match("marimo running")
+	end, "timed out waiting for interrupt keymap to clear running state", 5000)
 end
 
 local function test_toggle_disabled_keymap_updates_marker_and_runtime_status()
@@ -1501,8 +1576,11 @@ local tests = {
 	test_marimo_format_command_normalizes_projected_layout,
 	test_navigation_commands_jump_between_cells,
 	test_navigation_keymap_callbacks_work,
+	test_mode_toggle_keymap_callback_works,
 	test_run_current_cell_keymap_callback_works,
 	test_run_all_cells_keymap_callback_works,
+	test_format_keymap_callback_works,
+	test_interrupt_keymap_callback_works,
 	test_toggle_disabled_keymap_updates_marker_and_runtime_status,
 	test_output_keymap_opens_scrollable_float,
 	test_marimo_output_command_opens_current_cell_output,

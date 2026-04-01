@@ -46,7 +46,11 @@ your normal Neovim config.
 - Adds buffer-local cell navigation for projected marimo buffers:
   ` [m` jumps to the previous cell and `]m` jumps to the next cell.
 - Adds buffer-local run keymaps for projected marimo buffers:
-  `<leader>mr` runs the current cell and `<leader>mR` runs all cells.
+  `<leader>mr` runs the current cell, `<leader>mR` runs all cells, and
+  `<leader>mi` interrupts the active runtime.
+- Adds buffer-local editing keymaps for projected marimo buffers:
+  `<leader>mf` formats the projected layout and `<leader>mm` toggles marimo
+  mode for the buffer.
 - Adds a buffer-local disabled toggle for the current cell:
   `<leader>md` toggles `marimo_disabled` on the current projected cell.
 - Automatically creates a new trailing `# +` cell when jumping past the last
@@ -58,6 +62,7 @@ You can also use:
 - `:MarimoCellNext`
 - `:MarimoRunCell`
 - `:MarimoRunAll`
+- `:MarimoInterrupt`
 - `:MarimoOutput`
 - `:MarimoFormat`
 
@@ -66,10 +71,13 @@ The default keymaps can be changed or disabled in `setup`:
 ```lua
 require("marimo").setup({
   keymaps = {
+    mode_toggle = "<leader>mm",
     prev_cell = "[m",
     next_cell = "]m",
     run_cell = "<leader>mr",
     run_all_cells = "<leader>mR",
+    interrupt = "<leader>mi",
+    format = "<leader>mf",
     toggle_disabled = "<leader>md",
     show_output = "<leader>mo",
   },
