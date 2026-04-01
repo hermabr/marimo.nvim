@@ -518,7 +518,7 @@ local function status_highlight(runtime, output_highlight)
 		return "WarningMsg"
 	end
 	if runtime.stale_inputs then
-		return "WarningMsg"
+		return "Comment"
 	end
 	return "Comment"
 end

@@ -1700,6 +1700,30 @@ local function test_run_current_cell_command_refreshes_output()
 	assert_matches(lines, " 7")
 end
 
+local function test_run_current_cell_marks_untouched_cells_stale_on_fresh_runtime()
+	local path = make_path("runtime_run_current_stale.py")
+	write_file(
+		path,
+		"# + {marimo}\n\nx = 1\nx\n\n# +\n\ny = x + 1\ny\n\n# +\n\nz = 10\nz"
+	)
+	edit(path)
+
+	vim.cmd("Marimo on")
+	vim.api.nvim_win_set_cursor(0, { 3, 0 })
+	vim.cmd("MarimoRunCell")
+
+	wait_for_match(" 1")
+	wait_for_truthy(function()
+		local cells = vim.b.marimo_cells or {}
+		local second_runtime = cells[2] and cells[2].runtime or {}
+		local third_runtime = cells[3] and cells[3].runtime or {}
+		return second_runtime.stale_inputs == true and third_runtime.stale_inputs == true
+	end, "timed out waiting for untouched cells to be marked stale", 1000)
+
+	local stale_count = select(2, table.concat(rendered_lines(), "\n"):gsub("marimo stale", ""))
+	assert_eq(stale_count, 2)
+end
+
 local function test_run_current_cell_does_not_recreate_unrelated_image_placements()
 	local path = make_path("runtime_run_current_image_stability.py")
 	reset_snacks_image_calls()
@@ -1819,6 +1843,7 @@ local tests = {
 	test_runtime_errors_include_descriptive_stderr_context,
 	test_runtime_errors_show_multiple_definition_details,
 	test_run_current_cell_command_refreshes_output,
+	test_run_current_cell_marks_untouched_cells_stale_on_fresh_runtime,
 	test_run_current_cell_does_not_recreate_unrelated_image_placements,
 	test_deactivation_clears_runtime_image_placements,
 	test_interrupt_clears_running_placeholder,

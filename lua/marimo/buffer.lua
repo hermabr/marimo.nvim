@@ -316,6 +316,76 @@ local function mark_cells_locally_queued(bufnr, cell_ids)
 	})
 end
 
+local function runnable_untouched_cell_ids(snapshot, active_ids)
+	local active_lookup = {}
+	for _, cell_id in ipairs(active_ids or {}) do
+		active_lookup[cell_id] = true
+	end
+	local stale_ids = {}
+	for _, cell in ipairs(snapshot.cells or {}) do
+		if not active_lookup[cell.id] and not (cell.options or {}).disabled then
+			table.insert(stale_ids, cell.id)
+		end
+	end
+	return stale_ids
+end
+
+local function mark_cells_stale(bufnr, cell_ids)
+	local runtime_cells = vim.b[bufnr].marimo_runtime_cells or {}
+	local changed_ids = {}
+	for _, cell_id in ipairs(cell_ids or {}) do
+		local previous = runtime_cells[cell_id] or {}
+		local next_runtime = vim.deepcopy(previous)
+		local updated = false
+		if next_runtime.status ~= nil then
+			next_runtime.status = nil
+			updated = true
+		end
+		if next_runtime.stale_inputs ~= true then
+			next_runtime.stale_inputs = true
+			updated = true
+		end
+		if next_runtime.output ~= nil then
+			next_runtime.output = nil
+			updated = true
+		end
+		if next_runtime.console == nil or #next_runtime.console > 0 then
+			next_runtime.console = {}
+			updated = true
+		end
+		if next_runtime.last_execution_time_ms ~= nil then
+			next_runtime.last_execution_time_ms = nil
+			updated = true
+		end
+		if next_runtime._running_timestamp ~= nil then
+			next_runtime._running_timestamp = nil
+			updated = true
+		end
+		if next_runtime._running_started_at_ns ~= nil then
+			next_runtime._running_started_at_ns = nil
+			updated = true
+		end
+		if updated then
+			runtime_cells[cell_id] = next_runtime
+			table.insert(changed_ids, cell_id)
+		end
+	end
+	if #changed_ids == 0 then
+		return
+	end
+	vim.b[bufnr].marimo_runtime_cells = runtime_cells
+	refresh_cells(bufnr, {
+		changed_ids = changed_ids,
+	})
+end
+
+local function mark_fresh_partial_run_cells_stale(bufnr, snapshot, cell_ids)
+	if runtime_started(bufnr) then
+		return
+	end
+	mark_cells_stale(bufnr, runnable_untouched_cell_ids(snapshot, cell_ids))
+end
+
 local function clear_running_runtime_state(bufnr)
 	local runtime_cells, changed, changed_ids = runtime.apply_operation(vim.b[bufnr].marimo_runtime_cells or {}, {
 		op = "interrupted",
@@ -557,6 +627,9 @@ end
 
 local function queue_runtime_sync(bufnr, snapshot, run_ids, delete_ids)
 	local entry = state_for(bufnr)
+	if #run_ids > 0 then
+		mark_fresh_partial_run_cells_stale(bufnr, snapshot, run_ids)
+	end
 	entry.pending_sync = {
 		kind = "sync",
 		method = "sync_notebook",
@@ -576,6 +649,7 @@ end
 queue_runtime_run = function(bufnr, snapshot, cell_ids, codes)
 	settle_completed_runtime_request(bufnr)
 	local entry = state_for(bufnr)
+	mark_fresh_partial_run_cells_stale(bufnr, snapshot, cell_ids)
 	if entry.pending_run and entry.pending_run.params and entry.pending_run.params.cell_ids then
 		local merged_ids = vim.deepcopy(entry.pending_run.params.cell_ids)
 		local seen = {}
