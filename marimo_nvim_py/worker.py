@@ -29,22 +29,17 @@ def main() -> int:
 
     worker = Worker(event_sink=emit_event)
     methods = {
-        "open_session": worker.open_session,
-        "sync_projection": worker.sync_projection,
-        "sync_and_run": worker.sync_and_run,
-        "write_session": worker.write_session,
-        "write_projection": worker.write_projection,
-        "reload_from_disk": worker.reload_from_disk,
-        "ensure_runtime_session": worker.ensure_runtime_session,
-        "sync_runtime_graph": worker.sync_runtime_graph,
+        "load_raw_notebook": worker.load_raw_notebook,
+        "serialize_notebook": worker.serialize_notebook,
+        "ensure_session": worker.ensure_session,
+        "sync_notebook": worker.sync_notebook,
         "run_cells": worker.run_cells,
-        "get_runtime_state": worker.get_runtime_state,
-        "clear_outputs": worker.clear_outputs,
+        "set_ui_element_value": worker.set_ui_element_value,
+        "set_model_value": worker.set_model_value,
+        "invoke_function": worker.invoke_function,
+        "send_stdin": worker.send_stdin,
         "interrupt": worker.interrupt,
         "close_session": worker.close_session,
-        "get_session_state": worker.get_session_state,
-        "get_canonical_source": worker.get_canonical_source,
-        "get_projection_map": worker.get_projection_map,
         "shutdown": worker.shutdown,
     }
 

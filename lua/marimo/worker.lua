@@ -36,7 +36,7 @@ local function launch_spec(path)
 		vim.list_extend(cmd, { "--project", project_root })
 		runtime_kind = "uv_project"
 	end
-	vim.list_extend(cmd, { "--directory", root, "--with", "marimo", "python", "-m", "marimo_nvim_py.worker" })
+	vim.list_extend(cmd, { "--directory", root, "--with", "marimo", "--with", "pyzmq", "python", "-m", "marimo_nvim_py.worker" })
 	return {
 		project_root = project_root,
 		runtime_kind = runtime_kind,
@@ -179,6 +179,7 @@ local function send_request(path, method, params)
 		params = vim.tbl_extend("force", params or {}, {
 			project_root = project_root,
 			runtime_kind = worker.runtime_kind,
+			plugin_root = worker_script_path(),
 		}),
 	}
 	return worker, request_id, payload
@@ -277,6 +278,7 @@ function M.request_isolated_async(path, method, params, callback)
 		params = vim.tbl_extend("force", params or {}, {
 			project_root = find_project_root(path),
 			runtime_kind = spec.runtime_kind,
+			plugin_root = worker_script_path(),
 		}),
 	}
 	local ok = vim.fn.chansend(job_id, vim.json.encode(payload) .. "\n")
@@ -298,6 +300,7 @@ end
 
 M._private = {
 	find_project_root = find_project_root,
+	plugin_root = worker_script_path,
 }
 
 return M

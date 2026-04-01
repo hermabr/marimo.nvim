@@ -1,33 +1,29 @@
 from __future__ import annotations
 
+import subprocess
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 
+SnapshotCell = dict[str, Any]
+NotebookSnapshot = dict[str, Any]
+
+
 @dataclass
-class Session:
+class RuntimeSession:
     session_id: str
     path: str
     project_root: str
-    runtime_kind: str
-    header: str | None
-    app_options: dict[str, Any]
-    cells: list[dict[str, Any]]
-    canonical_source: str
-    projected_lines: list[str]
-    projection_map: dict[str, Any]
-    last_saved_source_hash: str
-    last_projection_hash: str
-    runtime_session: Any = None
-    runtime_consumer: Any = None
-    runtime_cells: dict[str, Any] | None = None
-    runtime_bootstrapped: bool = False
-    autorun_generation: int = 0
-    pending_changed_cell_ids: list[str] | None = None
-    last_runtime_sync_hash: str | None = None
-    runtime_lock: Any = None
-
-    def __post_init__(self) -> None:
-        if self.runtime_lock is None:
-            self.runtime_lock = threading.RLock()
+    plugin_root: str
+    snapshot: NotebookSnapshot
+    queue_manager: Any
+    process: subprocess.Popen[bytes]
+    consumer_thread: threading.Thread
+    lock: threading.RLock = field(default_factory=threading.RLock)
+    request_lock: threading.RLock = field(default_factory=threading.RLock)
+    stop_event: threading.Event = field(default_factory=threading.Event)
+    completed_runs: int = 0
+    function_results: dict[str, dict[str, Any]] = field(default_factory=dict)
+    active_request_id: int | None = None
+    current_operations: list[dict[str, Any]] | None = None

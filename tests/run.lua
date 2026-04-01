@@ -3,3 +3,4 @@ local root = vim.fn.fnamemodify(source, ":p:h:h")
 
 vim.opt.rtp:prepend(root)
 dofile(root .. "/tests/marimo_spec.lua")
+os.exit(0)
