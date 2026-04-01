@@ -129,6 +129,97 @@ def test_resolve_changed_dependents_returns_transitive_descendants(tmp_path: Pat
     assert result == {"cell_ids": ["cell-2", "cell-3"]}
 
 
+def test_resolve_runtime_updates_ignores_comment_only_changes(
+    tmp_path: Path,
+) -> None:
+    worker = Worker()
+    snapshot = build_snapshot(tmp_path / "comment_only.py")
+    snapshot["cells"] = [
+        {
+            "id": "cell-1",
+            "name": "_",
+            "code": "x = 1\n# comment only\nx",
+            "options": {},
+        },
+        {
+            "id": "cell-2",
+            "name": "_",
+            "code": "y = x + 1\ny",
+            "options": {},
+        },
+    ]
+
+    result = worker.resolve_runtime_updates(
+        {
+            "snapshot": snapshot,
+            "previous_cells": [
+                {
+                    "id": "cell-1",
+                    "name": "_",
+                    "code": "x = 1\nx",
+                    "options": {},
+                },
+                {
+                    "id": "cell-2",
+                    "name": "_",
+                    "code": "y = x + 1\ny",
+                    "options": {},
+                },
+            ],
+            "cell_ids": ["cell-1"],
+        }
+    )
+
+    assert result == {"changed_ids": [], "dependent_ids": []}
+
+
+def test_resolve_runtime_updates_returns_changed_cells_and_dependents(
+    tmp_path: Path,
+) -> None:
+    worker = Worker()
+    snapshot = build_snapshot(tmp_path / "runtime_updates.py")
+    snapshot["cells"] = [
+        {
+            "id": "cell-1",
+            "name": "_",
+            "code": "x = 2\nx",
+            "options": {},
+        },
+        {
+            "id": "cell-2",
+            "name": "_",
+            "code": "y = x + 1\ny",
+            "options": {},
+        },
+    ]
+
+    result = worker.resolve_runtime_updates(
+        {
+            "snapshot": snapshot,
+            "previous_cells": [
+                {
+                    "id": "cell-1",
+                    "name": "_",
+                    "code": "x = 1\nx",
+                    "options": {},
+                },
+                {
+                    "id": "cell-2",
+                    "name": "_",
+                    "code": "y = x + 1\ny",
+                    "options": {},
+                },
+            ],
+            "cell_ids": ["cell-1"],
+        }
+    )
+
+    assert result == {
+        "changed_ids": ["cell-1"],
+        "dependent_ids": ["cell-2"],
+    }
+
+
 def test_kernel_bridge_uses_uv_with_marimo(monkeypatch: Any, tmp_path: Path) -> None:
     snapshot = NotebookSnapshot.from_dict(build_snapshot(tmp_path / "worker.py"))
     captured: dict[str, Any] = {}

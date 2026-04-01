@@ -338,11 +338,26 @@ local function runtime_has_pending_work(bufnr)
 	return false
 end
 
+local finish_runtime_request
+
+local function settle_completed_runtime_request(bufnr)
+	local entry = runtime_state[bufnr]
+	if not entry or not entry.runtime_request then
+		return false
+	end
+	local active = entry.runtime_request
+	if not active.saw_operation or runtime_has_pending_work(bufnr) then
+		return false
+	end
+	finish_runtime_request(bufnr, active.request_id)
+	return true
+end
+
 local flush_runtime_queue
 local queue_runtime_run
 local codes_for_cell_ids
 
-local function finish_runtime_request(bufnr, request_id)
+finish_runtime_request = function(bufnr, request_id)
 	local entry = runtime_state[bufnr]
 	if not entry then
 		return
@@ -460,7 +475,12 @@ end
 
 flush_runtime_queue = function(bufnr)
 	local entry = state_for(bufnr)
-	if entry.runtime_request ~= nil or entry.interrupt_in_flight ~= nil then
+	if entry.runtime_request ~= nil then
+		if settle_completed_runtime_request(bufnr) then
+		end
+		return
+	end
+	if entry.interrupt_in_flight ~= nil then
 		return
 	end
 	local next_request = entry.pending_sync
@@ -514,6 +534,7 @@ local function send_interrupt_request(bufnr, cancelled_request_id)
 end
 
 local function prepare_runtime_invalidation(bufnr)
+	settle_completed_runtime_request(bufnr)
 	local entry = state_for(bufnr)
 	local should_interrupt = entry.runtime_request ~= nil
 	entry.pending_run = nil
@@ -553,6 +574,7 @@ local function queue_runtime_sync(bufnr, snapshot, run_ids, delete_ids)
 end
 
 queue_runtime_run = function(bufnr, snapshot, cell_ids, codes)
+	settle_completed_runtime_request(bufnr)
 	local entry = state_for(bufnr)
 	if entry.pending_run and entry.pending_run.params and entry.pending_run.params.cell_ids then
 		local merged_ids = vim.deepcopy(entry.pending_run.params.cell_ids)
@@ -594,39 +616,34 @@ local function sync_context_from_buffer(bufnr, opts)
 	local keep_modified = vim.bo[bufnr].modified
 	local snapshot, projected_lines, snapshot_err = current_snapshot_from_buffer(bufnr)
 	if snapshot_err then
-		return nil, nil, nil, snapshot_err
+		return nil, nil, nil, nil, snapshot_err
 	end
-	local changed_ids, deleted_ids = snapshot_state.compute_changes(previous_cells, snapshot.cells)
+	local raw_changed_ids, deleted_ids = snapshot_state.compute_changes(previous_cells, snapshot.cells)
 	local synced_snapshot = sync_local_snapshot_async(bufnr, snapshot, projected_lines, keep_modified, {
 		update_buffer_lines = opts.update_buffer_lines,
 		previous_cells = previous_cells,
-		changed_ids = changed_ids,
+		changed_ids = raw_changed_ids,
 		deleted_ids = deleted_ids,
 	})
 	local filepath = vim.api.nvim_buf_get_name(bufnr)
+	local runtime_changed_ids = vim.deepcopy(raw_changed_ids)
 	local dependent_ids = {}
-	if #changed_ids > 0 then
-		local resolved, dependent_err = worker.request(filepath, "resolve_changed_dependents", {
+	if #raw_changed_ids > 0 then
+		local resolved, dependent_err = worker.request(filepath, "resolve_runtime_updates", {
 			snapshot = vim.deepcopy(synced_snapshot),
-			cell_ids = vim.deepcopy(changed_ids),
+			previous_cells = vim.deepcopy(previous_cells),
+			cell_ids = vim.deepcopy(raw_changed_ids),
 		})
-		if not dependent_err and resolved and vim.islist(resolved.cell_ids) then
-			local changed_lookup = {}
-			for _, cell_id in ipairs(changed_ids) do
-				changed_lookup[cell_id] = true
+		if not dependent_err and resolved then
+			if vim.islist(resolved.changed_ids) then
+				runtime_changed_ids = resolved.changed_ids
 			end
-			local resolved_lookup = {}
-			for _, cell_id in ipairs(resolved.cell_ids) do
-				resolved_lookup[cell_id] = true
-			end
-			for _, cell in ipairs(synced_snapshot.cells or {}) do
-				if resolved_lookup[cell.id] and not changed_lookup[cell.id] and not (cell.options or {}).disabled then
-					table.insert(dependent_ids, cell.id)
-				end
+			if vim.islist(resolved.dependent_ids) then
+				dependent_ids = resolved.dependent_ids
 			end
 		end
 	end
-	return synced_snapshot, changed_ids, deleted_ids, dependent_ids, nil
+	return synced_snapshot, raw_changed_ids, deleted_ids, runtime_changed_ids, dependent_ids, nil
 end
 
 codes_for_cell_ids = function(snapshot, cell_ids)
@@ -898,7 +915,7 @@ function M.sync_buffer(bufnr, opts)
 	if not vim.b[bufnr].marimo_projected or not vim.b[bufnr].marimo_session_id then
 		return
 	end
-	local synced_snapshot, changed_ids, deleted_ids, dependent_ids, err = sync_context_from_buffer(bufnr, {
+	local synced_snapshot, changed_ids, deleted_ids, runtime_changed_ids, dependent_ids, err = sync_context_from_buffer(bufnr, {
 		update_buffer_lines = false,
 	})
 	if err then
@@ -906,11 +923,11 @@ function M.sync_buffer(bufnr, opts)
 		return
 	end
 	local should_autorun = opts.autorun ~= false
-	local run_ids = should_autorun and autorun_ids_for_changes(synced_snapshot, changed_ids) or {}
-	if ((runtime_started(bufnr) or opts.start_runtime) and (#changed_ids > 0 or #deleted_ids > 0 or opts.start_runtime)) then
+	local run_ids = should_autorun and autorun_ids_for_changes(synced_snapshot, runtime_changed_ids) or {}
+	if ((runtime_started(bufnr) or opts.start_runtime) and (#runtime_changed_ids > 0 or #deleted_ids > 0 or opts.start_runtime)) then
 		queue_invalidating_runtime_sync(bufnr, synced_snapshot, run_ids, deleted_ids, {
-			preempt_active = runtime_started(bufnr) and (#changed_ids > 0 or #deleted_ids > 0),
-			schedule_stale_followup = runtime_started(bufnr) and (#changed_ids > 0 or #deleted_ids > 0),
+			preempt_active = runtime_started(bufnr) and (#runtime_changed_ids > 0 or #deleted_ids > 0),
+			schedule_stale_followup = runtime_started(bufnr) and (#runtime_changed_ids > 0 or #deleted_ids > 0),
 		})
 		if #dependent_ids > 0 then
 			queue_runtime_run(bufnr, synced_snapshot, dependent_ids, codes_for_cell_ids(synced_snapshot, dependent_ids))
@@ -941,7 +958,7 @@ function M.format_buffer(bufnr)
 		vim.bo[bufnr].modified = true
 		return true
 	end
-	local synced_snapshot, _, deleted_ids, _, err = sync_context_from_buffer(bufnr, {
+	local synced_snapshot, _, deleted_ids, _, _, err = sync_context_from_buffer(bufnr, {
 		update_buffer_lines = true,
 	})
 	if err then
@@ -975,28 +992,28 @@ function M.schedule_sync(bufnr, opts)
 			if state_for(bufnr).sync_token ~= sync_token then
 				return
 			end
-				local synced_snapshot, changed_ids, deleted_ids, dependent_ids, err = sync_context_from_buffer(bufnr, {
-					update_buffer_lines = false,
+			local synced_snapshot, _, deleted_ids, runtime_changed_ids, dependent_ids, err = sync_context_from_buffer(bufnr, {
+				update_buffer_lines = false,
+			})
+			if err then
+				util.notify("failed to sync marimo notebook: " .. err, vim.log.levels.ERROR)
+				return
+			end
+			local run_ids = autorun_ids_for_changes(synced_snapshot, runtime_changed_ids)
+			if not runtime_started(bufnr) and #run_ids == 0 then
+				return
+			end
+			if runtime_started(bufnr) and (#runtime_changed_ids > 0 or #deleted_ids > 0) then
+				queue_invalidating_runtime_sync(bufnr, synced_snapshot, run_ids, deleted_ids, {
+					preempt_active = true,
+					schedule_stale_followup = true,
 				})
-				if err then
-					util.notify("failed to sync marimo notebook: " .. err, vim.log.levels.ERROR)
-					return
+				if #dependent_ids > 0 then
+					queue_runtime_run(bufnr, synced_snapshot, dependent_ids, codes_for_cell_ids(synced_snapshot, dependent_ids))
 				end
-				local run_ids = autorun_ids_for_changes(synced_snapshot, changed_ids)
-				if not runtime_started(bufnr) and #run_ids == 0 then
-					return
-				end
-				if runtime_started(bufnr) and (#changed_ids > 0 or #deleted_ids > 0) then
-					queue_invalidating_runtime_sync(bufnr, synced_snapshot, run_ids, deleted_ids, {
-						preempt_active = true,
-						schedule_stale_followup = true,
-					})
-					if #dependent_ids > 0 then
-						queue_runtime_run(bufnr, synced_snapshot, dependent_ids, codes_for_cell_ids(synced_snapshot, dependent_ids))
-					end
-				elseif #run_ids > 0 then
-					queue_runtime_run(bufnr, synced_snapshot, run_ids, codes_for_cell_ids(synced_snapshot, run_ids))
-				end
+			elseif #run_ids > 0 then
+				queue_runtime_run(bufnr, synced_snapshot, run_ids, codes_for_cell_ids(synced_snapshot, run_ids))
+			end
 			end)
 		end)
 end
@@ -1007,7 +1024,7 @@ function M.run_all_cells(bufnr)
 		return
 	end
 	stop_autorun_timer(bufnr)
-	local synced_snapshot, changed_ids, deleted_ids, _, err = sync_context_from_buffer(bufnr, {
+	local synced_snapshot, changed_ids, deleted_ids, runtime_changed_ids, _, err = sync_context_from_buffer(bufnr, {
 		update_buffer_lines = false,
 	})
 	if err then
@@ -1019,8 +1036,8 @@ function M.run_all_cells(bufnr)
 		table.insert(cell_ids, cell.id)
 	end
 	queue_invalidating_runtime_sync(bufnr, synced_snapshot, cell_ids, deleted_ids, {
-		preempt_active = runtime_started(bufnr) and (#changed_ids > 0 or #deleted_ids > 0),
-		schedule_stale_followup = runtime_started(bufnr) and (#changed_ids > 0 or #deleted_ids > 0),
+		preempt_active = runtime_started(bufnr) and (#runtime_changed_ids > 0 or #deleted_ids > 0),
+		schedule_stale_followup = runtime_started(bufnr) and (#runtime_changed_ids > 0 or #deleted_ids > 0),
 	})
 end
 
@@ -1030,7 +1047,7 @@ function M.run_current_cell(bufnr)
 		return
 	end
 	stop_autorun_timer(bufnr)
-	local synced_snapshot, changed_ids, deleted_ids, _, err = sync_context_from_buffer(bufnr, {
+	local synced_snapshot, changed_ids, deleted_ids, runtime_changed_ids, _, err = sync_context_from_buffer(bufnr, {
 		update_buffer_lines = false,
 	})
 	if err then
@@ -1042,7 +1059,7 @@ function M.run_current_cell(bufnr)
 		util.notify("no current marimo cell", vim.log.levels.WARN)
 		return
 	end
-	if runtime_started(bufnr) and (#changed_ids > 0 or #deleted_ids > 0) then
+	if runtime_started(bufnr) and (#runtime_changed_ids > 0 or #deleted_ids > 0) then
 		queue_invalidating_runtime_sync(bufnr, synced_snapshot, {}, deleted_ids, {
 			preempt_active = true,
 		})
