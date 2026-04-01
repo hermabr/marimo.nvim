@@ -295,13 +295,13 @@ local function append_lines(target, lines)
 	end
 end
 
-local function html_to_text(text, opts)
+local function html_to_lines(text)
 	if type(text) ~= "string" or text == "" then
 		return {}
 	end
 	local marimo_table_lines = marimo_table_to_lines(text)
 	if #marimo_table_lines > 0 then
-		return limit_lines(marimo_table_lines, opts or {})
+		return marimo_table_lines
 	end
 	local lines = {}
 	local normalized = strip_non_content_blocks(text)
@@ -320,7 +320,11 @@ local function html_to_text(text, opts)
 		start_idx = table_end + 1
 	end
 	append_lines(lines, fragment_to_lines(normalized:sub(start_idx)))
-	return limit_lines(lines, opts or {})
+	return lines
+end
+
+local function html_to_text(text, opts)
+	return limit_lines(html_to_lines(text), opts or {})
 end
 
 local function looks_like_html(text)
@@ -328,6 +332,19 @@ local function looks_like_html(text)
 		return false
 	end
 	return text:find("<[%a!/][^>]*>") ~= nil
+end
+
+local function traceback_to_lines(text)
+	if type(text) ~= "string" or text == "" then
+		return {}
+	end
+	if looks_like_html(text) then
+		local lines = html_to_lines(text)
+		if #lines > 0 then
+			return lines
+		end
+	end
+	return vim.split(text, "\n", { plain = true })
 end
 
 local function placeholder_for_mimetype(mimetype)
@@ -453,7 +470,7 @@ local function render_output(output, opts)
 		return split_lines(data, opts), "String"
 	end
 	if mimetype == "application/vnd.marimo+traceback" then
-		return split_lines(data, opts), "ErrorMsg"
+		return limit_lines(traceback_to_lines(data), opts), "ErrorMsg"
 	end
 	if mimetype == "application/vnd.marimo+error" then
 		return render_error_output(data, opts), "ErrorMsg"
@@ -498,7 +515,14 @@ local function render_console(console, opts)
 				end
 			end
 		elseif type(data) == "string" then
-			local chunks = mimetype == "text/html" and html_to_text(data, opts) or vim.split(data, "\n", { plain = true })
+			local chunks
+			if mimetype == "text/html" then
+				chunks = html_to_lines(data)
+			elseif mimetype == "application/vnd.marimo+traceback" then
+				chunks = traceback_to_lines(data)
+			else
+				chunks = vim.split(data, "\n", { plain = true })
+			end
 			for _, line in ipairs(chunks) do
 				table.insert(lines, line)
 			end

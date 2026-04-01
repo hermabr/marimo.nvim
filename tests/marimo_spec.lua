@@ -1628,6 +1628,42 @@ local function test_runtime_markdown_html_is_summarized_as_text()
 	assert_truthy(not lines:match("%[html output%]"), "expected markdown html to render as text")
 end
 
+local function test_runtime_tracebacks_are_summarized_as_text()
+	local render = dofile(vim.fn.getcwd() .. "/lua/marimo/render.lua")
+	local path = make_path("runtime_traceback_html.py")
+	write_file(path, "# + {marimo}\n\nx = 1")
+	edit(path)
+
+	render.render(0, {
+		{
+			id = "cell-1",
+			projection_range = { start_line = 1, end_line = 3 },
+			runtime = {
+				output = {
+					mimetype = "text/plain",
+					data = "",
+				},
+				console = {
+					{
+						channel = "stderr",
+						mimetype = "application/vnd.marimo+traceback",
+						data = '<span class="codehilite"><pre>Traceback (most recent call last):\n  File "/tmp/__marimo__cell.py", line 1, in &lt;module&gt;\n    raise ValueError(&quot;boom&quot;)\nValueError: boom\n</pre></span>',
+					},
+				},
+			},
+		},
+	})
+
+	local lines = table.concat(rendered_lines(), "\n")
+	assert_matches(lines, "Traceback %(most recent call last%)")
+	assert_matches(lines, 'File "/tmp/__marimo__cell%.py", line 1, in <module>')
+	assert_matches(lines, 'raise ValueError%("boom"%)')
+	assert_matches(lines, "ValueError: boom")
+	assert_truthy(not lines:match("<span"), "expected traceback html wrapper to be stripped")
+	assert_truthy(not lines:match("<pre"), "expected traceback pre tag to be stripped")
+	assert_truthy(not lines:match("codehilite"), "expected traceback styling class to be stripped")
+end
+
 local function test_runtime_marimo_table_html_is_summarized_as_text()
 	local render = dofile(vim.fn.getcwd() .. "/lua/marimo/render.lua")
 	local path = make_path("runtime_marimo_table.py")
@@ -1839,6 +1875,7 @@ local tests = {
 	test_runtime_outputs_include_stdout_after_html_output,
 	test_runtime_html_tables_are_summarized_as_text,
 	test_runtime_markdown_html_is_summarized_as_text,
+	test_runtime_tracebacks_are_summarized_as_text,
 	test_runtime_marimo_table_html_is_summarized_as_text,
 	test_runtime_errors_include_descriptive_stderr_context,
 	test_runtime_errors_show_multiple_definition_details,
