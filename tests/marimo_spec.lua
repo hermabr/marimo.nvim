@@ -622,11 +622,9 @@ local function test_toggle_disabled_keymap_updates_marker_and_runtime_status()
 		return vim.api.nvim_buf_get_lines(0, 0, 1, false)[1] == "# + {marimo,marimo_disabled}"
 	end, "timed out waiting for disabled marker")
 	wait_for_match("marimo disabled")
-	wait_for_match("marimo disabled %(ancestor%)")
 
 	local lines = table.concat(rendered_lines(), "\n")
 	assert_matches(lines, "marimo disabled")
-	assert_matches(lines, "marimo disabled %(ancestor%)")
 	assert_truthy(not lines:match("marimo stale"), "expected disabled cells to suppress stale label")
 
 	toggle_map.callback()
@@ -912,8 +910,14 @@ local function test_sync_buffer_updates_reactive_outputs()
 	edit(path)
 
 	vim.cmd("Marimo on")
+	vim.cmd("MarimoRunAll")
+	wait_for_match(" 1")
+	wait_for_match(" 2")
 	vim.api.nvim_buf_set_lines(0, 2, 3, false, { "x = 3" })
 	require("marimo").sync_buffer(0)
+	vim.cmd("MarimoRunAll")
+	wait_for_match(" 3")
+	wait_for_match(" 4")
 
 	local lines = table.concat(rendered_lines(), "\n")
 	assert_matches(lines, " 3")

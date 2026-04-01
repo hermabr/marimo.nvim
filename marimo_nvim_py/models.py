@@ -1,33 +1,63 @@
 from __future__ import annotations
 
-import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 
 @dataclass
-class Session:
+class SnapshotCell:
+    id: str
+    name: str
+    code: str
+    options: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> SnapshotCell:
+        return cls(
+            id=str(data["id"]),
+            name=str(data.get("name", "_")),
+            code=str(data.get("code", "")),
+            options=dict(data.get("options") or {}),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "code": self.code,
+            "options": dict(self.options),
+        }
+
+
+@dataclass
+class NotebookSnapshot:
     session_id: str
     path: str
     project_root: str
     runtime_kind: str
     header: str | None
     app_options: dict[str, Any]
-    cells: list[dict[str, Any]]
-    canonical_source: str
-    projected_lines: list[str]
-    projection_map: dict[str, Any]
-    last_saved_source_hash: str
-    last_projection_hash: str
-    runtime_session: Any = None
-    runtime_consumer: Any = None
-    runtime_cells: dict[str, Any] | None = None
-    runtime_bootstrapped: bool = False
-    autorun_generation: int = 0
-    pending_changed_cell_ids: list[str] | None = None
-    last_runtime_sync_hash: str | None = None
-    runtime_lock: Any = None
+    cells: list[SnapshotCell]
 
-    def __post_init__(self) -> None:
-        if self.runtime_lock is None:
-            self.runtime_lock = threading.RLock()
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> NotebookSnapshot:
+        return cls(
+            session_id=str(data["session_id"]),
+            path=str(data["path"]),
+            project_root=str(data.get("project_root") or ""),
+            runtime_kind=str(data.get("runtime_kind") or "uv"),
+            header=data.get("header"),
+            app_options=dict(data.get("app_options") or {}),
+            cells=[SnapshotCell.from_dict(cell) for cell in list(data.get("cells") or [])],
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "session_id": self.session_id,
+            "path": self.path,
+            "project_root": self.project_root,
+            "runtime_kind": self.runtime_kind,
+            "header": self.header,
+            "app_options": dict(self.app_options),
+            "cells": [cell.to_dict() for cell in self.cells],
+        }

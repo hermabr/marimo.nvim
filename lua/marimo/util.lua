@@ -1,4 +1,5 @@
 local M = {}
+local next_local_id = 0
 
 function M.notify(msg, level)
 	vim.notify("marimo.nvim: " .. msg, level or vim.log.levels.INFO)
@@ -37,6 +38,11 @@ function M.request_redraw()
 	vim.schedule(function()
 		pcall(vim.cmd, "redraw")
 	end)
+end
+
+function M.new_local_id()
+	next_local_id = next_local_id + 1
+	return string.format("marimo-nvim-%d-%d", vim.uv.hrtime(), next_local_id)
 end
 
 return M
