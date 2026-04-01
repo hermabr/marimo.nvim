@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from typing import Any, Callable
+from typing import Any, Callable, cast
+
+from marimo._ast.compiler import compile_cell
+from marimo._runtime.dataflow.graph import DirectedGraph
+from marimo._types.ids import CellId_t
 
 from marimo_nvim_py.codec import load_raw_notebook, serialize_notebook
 from marimo_nvim_py.models import NotebookSnapshot
@@ -36,6 +40,35 @@ class Worker:
     def serialize_notebook(self, params: dict[str, Any]) -> dict[str, Any]:
         snapshot = NotebookSnapshot.from_dict(dict(params["snapshot"]))
         return serialize_notebook(snapshot)
+
+    def resolve_changed_dependents(self, params: dict[str, Any]) -> dict[str, Any]:
+        snapshot = NotebookSnapshot.from_dict(dict(params["snapshot"]))
+        changed_ids = {str(cell_id) for cell_id in list(params.get("cell_ids") or [])}
+        try:
+            graph = DirectedGraph()
+            for cell in snapshot.cells:
+                graph.register_cell(
+                    cast(CellId_t, cell.id),
+                    compile_cell(
+                        code=cell.code,
+                        cell_id=cast(CellId_t, cell.id),
+                        filename=None,
+                    ),
+                )
+        except Exception:
+            return {"cell_ids": []}
+
+        dependent_ids: set[str] = set()
+        for cell_id in changed_ids:
+            if cast(CellId_t, cell_id) not in graph.cells:
+                continue
+            dependent_ids.update(
+                str(descendant_id)
+                for descendant_id in graph.descendants(cast(CellId_t, cell_id))
+            )
+
+        ordered_ids = [cell.id for cell in snapshot.cells if cell.id in dependent_ids]
+        return {"cell_ids": ordered_ids}
 
     def ensure_session(self, params: dict[str, Any]) -> dict[str, Any]:
         snapshot = NotebookSnapshot.from_dict(dict(params["snapshot"]))

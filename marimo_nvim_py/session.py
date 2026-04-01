@@ -330,8 +330,19 @@ class BridgeSession:
             assert self.kernel is not None
             with self.lock:
                 self.active_request_id = request_id
+                previous_completed_runs = self.completed_runs
+                had_pending_work = any(
+                    notification.status in {"running", "queued"}
+                    for notification in self.session_view.cell_notifications.values()
+                )
             self.kernel.interrupt()
-        self._drain_notifications(timeout=0.1)
+        if had_pending_work:
+            try:
+                self._wait_for_completion(previous_completed_runs, timeout=2.0)
+            except TimeoutError:
+                self._drain_notifications(timeout=0.1)
+        else:
+            self._drain_notifications(timeout=0.1)
         with self.lock:
             self.active_request_id = None
 
