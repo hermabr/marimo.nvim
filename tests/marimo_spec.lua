@@ -70,6 +70,17 @@ local function edit(path)
 	vim.cmd("edit " .. vim.fn.fnameescape(path))
 end
 
+local function with_cwd(path, fn)
+	local previous = vim.fn.getcwd()
+	vim.cmd("cd " .. vim.fn.fnameescape(path))
+	local ok, result = xpcall(fn, debug.traceback)
+	vim.cmd("cd " .. vim.fn.fnameescape(previous))
+	if not ok then
+		error(result)
+	end
+	return result
+end
+
 local function wait_for_truthy(fn, message, timeout)
 	local matched = vim.wait(timeout or 5000, fn, 20)
 	assert_truthy(matched, message or "timed out waiting for condition")
@@ -1575,20 +1586,23 @@ local function test_runtime_outputs_include_stdout_after_html_output()
 	assert_matches(lines, " HEY")
 end
 
-local function test_runtime_uses_notebook_directory_as_cwd()
+local function test_runtime_uses_neovim_cwd_as_launch_cwd()
 	local dir = make_path("cwd_runtime")
-	local path = dir .. "/nested/notebook.py"
-	local expected_dir = vim.fn.resolve(dir .. "/nested")
-	vim.fn.mkdir(expected_dir, "p")
-	write_file(path, '# + {marimo}\n\nfrom pathlib import Path\nPath(".").resolve()')
-	edit(path)
+	local launch_dir = vim.fn.resolve(dir)
+	local notebook_dir = vim.fn.resolve(dir .. "/nested")
+	vim.fn.mkdir(notebook_dir, "p")
+	write_file(notebook_dir .. "/notebook.py", '# + {marimo}\n\nfrom pathlib import Path\nPath(".").resolve()')
 
-	vim.cmd("Marimo on")
-	vim.cmd("MarimoRunAll")
-	wait_for_match(vim.pesc(expected_dir))
+	with_cwd(launch_dir, function()
+		edit("nested/notebook.py")
+		vim.cmd("Marimo on")
+		vim.cmd("MarimoRunAll")
+		wait_for_match(vim.pesc(launch_dir))
 
-	local lines = table.concat(rendered_lines(), "\n")
-	assert_matches(lines, vim.pesc(expected_dir))
+		local lines = table.concat(rendered_lines(), "\n")
+		assert_matches(lines, vim.pesc(launch_dir))
+		assert_truthy(not lines:match(vim.pesc(notebook_dir)), "expected runtime cwd to follow Neovim cwd, not notebook directory")
+	end)
 end
 
 local function test_runtime_html_tables_are_summarized_as_text()
@@ -1889,7 +1903,7 @@ local tests = {
 	test_reentering_buffer_does_not_rerun_runtime,
 	test_runtime_outputs_include_stdout,
 	test_runtime_outputs_include_stdout_after_html_output,
-	test_runtime_uses_notebook_directory_as_cwd,
+	test_runtime_uses_neovim_cwd_as_launch_cwd,
 	test_runtime_html_tables_are_summarized_as_text,
 	test_runtime_markdown_html_is_summarized_as_text,
 	test_runtime_tracebacks_are_summarized_as_text,

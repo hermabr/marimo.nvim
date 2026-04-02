@@ -38,6 +38,7 @@ def build_snapshot(path: Path, code: str = "x = 1\nx") -> dict[str, Any]:
         "path": str(path),
         "project_root": str(path.parent),
         "runtime_kind": "uv_project",
+        "launch_cwd": str(path.parent),
         "header": None,
         "app_options": {},
         "cells": [
@@ -73,16 +74,20 @@ def wait_for_truthy(predicate: Any, timeout: float = 5.0) -> None:
 
 def test_load_raw_notebook_returns_normalized_snapshot(tmp_path: Path) -> None:
     path = tmp_path / "notebook.py"
+    launch_cwd = tmp_path / "launch"
+    launch_cwd.mkdir()
     snapshot = load_raw_notebook(
         path=str(path),
         content=RAW_NOTEBOOK,
         project_root=str(tmp_path),
         runtime_kind="uv_project",
+        launch_cwd=str(launch_cwd),
     )
     assert snapshot.session_id == str(path)
     assert snapshot.path == str(path)
     assert snapshot.project_root == str(tmp_path)
     assert snapshot.runtime_kind == "uv_project"
+    assert snapshot.launch_cwd == str(launch_cwd)
     assert len(snapshot.cells) == 1
     assert snapshot.cells[0].code == "x = 1\nx"
 
@@ -221,7 +226,11 @@ def test_resolve_runtime_updates_returns_changed_cells_and_dependents(
 
 
 def test_kernel_bridge_uses_uv_with_marimo(monkeypatch: Any, tmp_path: Path) -> None:
-    snapshot = NotebookSnapshot.from_dict(build_snapshot(tmp_path / "worker.py"))
+    launch_cwd = tmp_path / "launch"
+    launch_cwd.mkdir()
+    snapshot_dict = build_snapshot(tmp_path / "worker.py")
+    snapshot_dict["launch_cwd"] = str(launch_cwd)
+    snapshot = NotebookSnapshot.from_dict(snapshot_dict)
     captured: dict[str, Any] = {}
 
     class FakePopen:
@@ -265,7 +274,7 @@ def test_kernel_bridge_uses_uv_with_marimo(monkeypatch: Any, tmp_path: Path) -> 
     assert "marimo" in captured["cmd"]
     assert "pyzmq" in captured["cmd"]
     assert captured["cmd"][-2:] == ["-m", "marimo._ipc.launch_kernel"]
-    assert captured["kwargs"]["cwd"] == str(tmp_path.resolve())
+    assert captured["kwargs"]["cwd"] == str(launch_cwd.resolve())
 
 
 def test_worker_run_cells_forwards_raw_operation_events(tmp_path: Path) -> None:

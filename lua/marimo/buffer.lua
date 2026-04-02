@@ -85,14 +85,24 @@ local function runtime_started(bufnr)
 	return entry.runtime_request ~= nil or entry.pending_sync ~= nil or entry.pending_run ~= nil
 end
 
+local function launch_cwd_for_buffer(bufnr)
+	local launch_cwd = vim.b[bufnr].marimo_launch_cwd
+	if type(launch_cwd) == "string" and launch_cwd ~= "" then
+		return launch_cwd
+	end
+	return vim.fn.getcwd()
+end
+
 local function runtime_metadata(bufnr)
 	local filepath = vim.api.nvim_buf_get_name(bufnr)
 	local project_root = vim.b[bufnr].marimo_project_root
 	local runtime_kind = vim.b[bufnr].marimo_runtime_kind
+	local launch_cwd = launch_cwd_for_buffer(bufnr)
 	if project_root and runtime_kind then
-		return project_root, runtime_kind
+		return project_root, runtime_kind, launch_cwd
 	end
-	return worker.resolve_runtime(filepath)
+	local resolved_project_root, resolved_runtime_kind = worker.resolve_runtime(filepath)
+	return resolved_project_root, resolved_runtime_kind, launch_cwd
 end
 
 local function refresh_cells(bufnr, opts)
@@ -254,13 +264,14 @@ end
 
 local function current_snapshot_from_buffer(bufnr)
 	local filepath = vim.api.nvim_buf_get_name(bufnr)
-	local project_root, runtime_kind = runtime_metadata(bufnr)
+	local project_root, runtime_kind, launch_cwd = runtime_metadata(bufnr)
 	local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
 	local ok, snapshot, projected_lines = pcall(snapshot_state.snapshot_from_projected_lines, {
 		session_id = vim.b[bufnr].marimo_session_id or filepath,
 		path = filepath,
 		project_root = project_root,
 		runtime_kind = runtime_kind,
+		launch_cwd = launch_cwd,
 		header = vim.b[bufnr].marimo_header,
 		app_options = vim.b[bufnr].marimo_app_options or {},
 		previous_cells = vim.b[bufnr].marimo_cells,
@@ -900,6 +911,7 @@ local function open_raw_notebook(bufnr, opts)
 	local loaded, err = worker.request(filepath, "load_raw_notebook", {
 		path = filepath,
 		content = util.join_lines(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)),
+		launch_cwd = launch_cwd_for_buffer(bufnr),
 	})
 	if err then
 		util.notify("failed to open marimo notebook: " .. err, vim.log.levels.ERROR)
@@ -1230,7 +1242,7 @@ function M.activate(bufnr, opts)
 	end
 	local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
 	local filepath = vim.api.nvim_buf_get_name(bufnr)
-	local project_root, runtime_kind = runtime_metadata(bufnr)
+	local project_root, runtime_kind, launch_cwd = runtime_metadata(bufnr)
 	if markers.looks_like_marimo(lines) then
 		M.project_buffer(bufnr, opts)
 		return
@@ -1241,6 +1253,7 @@ function M.activate(bufnr, opts)
 			path = filepath,
 			project_root = project_root,
 			runtime_kind = runtime_kind,
+			launch_cwd = launch_cwd,
 			header = nil,
 			app_options = vim.empty_dict(),
 			previous_cells = nil,
@@ -1267,6 +1280,7 @@ function M.activate(bufnr, opts)
 				path = filepath,
 				project_root = project_root,
 				runtime_kind = runtime_kind,
+				launch_cwd = launch_cwd,
 				header = nil,
 				app_options = vim.empty_dict(),
 				previous_cells = nil,
@@ -1288,6 +1302,7 @@ function M.activate(bufnr, opts)
 			path = filepath,
 			project_root = project_root,
 			runtime_kind = runtime_kind,
+			launch_cwd = launch_cwd,
 			previous_cells = nil,
 			lines = lines,
 		})
