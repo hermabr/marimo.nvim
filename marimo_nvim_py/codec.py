@@ -47,6 +47,7 @@ def load_raw_notebook(
     content: str,
     project_root: str,
     runtime_kind: str,
+    launch_cwd: str,
 ) -> NotebookSnapshot:
     serializer = PythonNotebookSerializer()
     notebook = serializer.deserialize(content, filepath=path)
@@ -69,6 +70,7 @@ def load_raw_notebook(
         path=path,
         project_root=project_root or str(Path(path).resolve().parent),
         runtime_kind=runtime_kind or "uv",
+        launch_cwd=launch_cwd or project_root or str(Path(path).resolve().parent),
         header=notebook.header.value if notebook.header and notebook.header.value else None,
         app_options=dict(notebook.app.options or {}),
         cells=cells,

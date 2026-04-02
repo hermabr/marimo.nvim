@@ -35,6 +35,7 @@ class NotebookSnapshot:
     path: str
     project_root: str
     runtime_kind: str
+    launch_cwd: str
     header: str | None
     app_options: dict[str, Any]
     cells: list[SnapshotCell]
@@ -46,6 +47,7 @@ class NotebookSnapshot:
             path=str(data["path"]),
             project_root=str(data.get("project_root") or ""),
             runtime_kind=str(data.get("runtime_kind") or "uv"),
+            launch_cwd=str(data.get("launch_cwd") or ""),
             header=data.get("header"),
             app_options=dict(data.get("app_options") or {}),
             cells=[SnapshotCell.from_dict(cell) for cell in list(data.get("cells") or [])],
@@ -57,6 +59,7 @@ class NotebookSnapshot:
             "path": self.path,
             "project_root": self.project_root,
             "runtime_kind": self.runtime_kind,
+            "launch_cwd": self.launch_cwd,
             "header": self.header,
             "app_options": dict(self.app_options),
             "cells": [cell.to_dict() for cell in self.cells],
