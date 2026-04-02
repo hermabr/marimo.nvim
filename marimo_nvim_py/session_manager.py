@@ -33,6 +33,7 @@ class Worker:
         snapshot = load_raw_notebook(
             path=str(params["path"]),
             content=str(params["content"]),
+            cwd=str(params.get("cwd") or ""),
             project_root=str(params.get("project_root") or ""),
             runtime_kind=str(params.get("runtime_kind") or "uv"),
         )

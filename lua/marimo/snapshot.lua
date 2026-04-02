@@ -243,6 +243,7 @@ function M.snapshot_from_projected_lines(opts)
 	local snapshot = {
 		session_id = opts.session_id,
 		path = opts.path,
+		cwd = opts.cwd,
 		project_root = opts.project_root,
 		runtime_kind = opts.runtime_kind,
 		header = opts.header,
@@ -265,6 +266,7 @@ function M.snapshot_from_manual_python(opts)
 	local snapshot = {
 		session_id = opts.session_id,
 		path = opts.path,
+		cwd = opts.cwd,
 		project_root = opts.project_root,
 		runtime_kind = opts.runtime_kind,
 		header = nil,

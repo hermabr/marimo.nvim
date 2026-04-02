@@ -87,12 +87,13 @@ end
 
 local function runtime_metadata(bufnr)
 	local filepath = vim.api.nvim_buf_get_name(bufnr)
+	local cwd = vim.b[bufnr].marimo_cwd
 	local project_root = vim.b[bufnr].marimo_project_root
 	local runtime_kind = vim.b[bufnr].marimo_runtime_kind
-	if project_root and runtime_kind then
-		return project_root, runtime_kind
+	if cwd and project_root and runtime_kind then
+		return cwd, project_root, runtime_kind
 	end
-	return worker.resolve_runtime(filepath)
+	return vim.fn.getcwd(), worker.resolve_runtime(filepath)
 end
 
 local function refresh_cells(bufnr, opts)
@@ -254,11 +255,12 @@ end
 
 local function current_snapshot_from_buffer(bufnr)
 	local filepath = vim.api.nvim_buf_get_name(bufnr)
-	local project_root, runtime_kind = runtime_metadata(bufnr)
+	local cwd, project_root, runtime_kind = runtime_metadata(bufnr)
 	local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
 	local ok, snapshot, projected_lines = pcall(snapshot_state.snapshot_from_projected_lines, {
 		session_id = vim.b[bufnr].marimo_session_id or filepath,
 		path = filepath,
+		cwd = cwd,
 		project_root = project_root,
 		runtime_kind = runtime_kind,
 		header = vim.b[bufnr].marimo_header,
@@ -900,6 +902,7 @@ local function open_raw_notebook(bufnr, opts)
 	local loaded, err = worker.request(filepath, "load_raw_notebook", {
 		path = filepath,
 		content = util.join_lines(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)),
+		cwd = vim.fn.getcwd(),
 	})
 	if err then
 		util.notify("failed to open marimo notebook: " .. err, vim.log.levels.ERROR)
@@ -1230,7 +1233,7 @@ function M.activate(bufnr, opts)
 	end
 	local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
 	local filepath = vim.api.nvim_buf_get_name(bufnr)
-	local project_root, runtime_kind = runtime_metadata(bufnr)
+	local cwd, project_root, runtime_kind = runtime_metadata(bufnr)
 	if markers.looks_like_marimo(lines) then
 		M.project_buffer(bufnr, opts)
 		return
@@ -1239,6 +1242,7 @@ function M.activate(bufnr, opts)
 		local ok, snapshot, projected_lines = pcall(snapshot_state.snapshot_from_projected_lines, {
 			session_id = filepath,
 			path = filepath,
+			cwd = cwd,
 			project_root = project_root,
 			runtime_kind = runtime_kind,
 			header = nil,
@@ -1265,6 +1269,7 @@ function M.activate(bufnr, opts)
 			local ok, snapshot, projected_lines = pcall(snapshot_state.snapshot_from_projected_lines, {
 				session_id = filepath,
 				path = filepath,
+				cwd = cwd,
 				project_root = project_root,
 				runtime_kind = runtime_kind,
 				header = nil,
@@ -1286,6 +1291,7 @@ function M.activate(bufnr, opts)
 		local ok, snapshot, projected_lines = pcall(snapshot_state.snapshot_from_manual_python, {
 			session_id = filepath,
 			path = filepath,
+			cwd = cwd,
 			project_root = project_root,
 			runtime_kind = runtime_kind,
 			previous_cells = nil,

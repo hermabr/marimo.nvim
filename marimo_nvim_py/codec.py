@@ -45,6 +45,7 @@ def load_raw_notebook(
     *,
     path: str,
     content: str,
+    cwd: str,
     project_root: str,
     runtime_kind: str,
 ) -> NotebookSnapshot:
@@ -67,6 +68,7 @@ def load_raw_notebook(
     return NotebookSnapshot(
         session_id=path,
         path=path,
+        cwd=cwd,
         project_root=project_root or str(Path(path).resolve().parent),
         runtime_kind=runtime_kind or "uv",
         header=notebook.header.value if notebook.header and notebook.header.value else None,

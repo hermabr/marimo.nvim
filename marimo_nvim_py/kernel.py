@@ -52,6 +52,8 @@ class KernelBridge:
 
     @staticmethod
     def _launch_cwd(snapshot: NotebookSnapshot) -> str:
+        if snapshot.cwd:
+            return str(Path(snapshot.cwd).resolve())
         if snapshot.path:
             return str(Path(snapshot.path).resolve().parent)
         if snapshot.project_root:

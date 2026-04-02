@@ -1577,10 +1577,12 @@ end
 
 local function test_runtime_uses_notebook_directory_as_cwd()
 	local dir = make_path("cwd_runtime")
-	local path = dir .. "/nested/notebook.py"
-	local expected_dir = vim.fn.resolve(dir .. "/nested")
-	vim.fn.mkdir(expected_dir, "p")
+	local path = dir .. "/dirr/notebook.py"
+	local expected_dir = vim.fn.resolve(dir)
+	local previous_cwd = vim.fn.getcwd()
+	vim.fn.mkdir(vim.fn.resolve(dir .. "/dirr"), "p")
 	write_file(path, '# + {marimo}\n\nfrom pathlib import Path\nPath(".").resolve()')
+	vim.cmd("cd " .. vim.fn.fnameescape(dir))
 	edit(path)
 
 	vim.cmd("Marimo on")
@@ -1589,6 +1591,7 @@ local function test_runtime_uses_notebook_directory_as_cwd()
 
 	local lines = table.concat(rendered_lines(), "\n")
 	assert_matches(lines, vim.pesc(expected_dir))
+	vim.cmd("cd " .. vim.fn.fnameescape(previous_cwd))
 end
 
 local function test_runtime_html_tables_are_summarized_as_text()

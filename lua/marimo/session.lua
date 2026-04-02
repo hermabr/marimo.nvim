@@ -4,6 +4,7 @@ function M.set_session(bufnr, payload)
 	local runtime_cells = vim.b[bufnr].marimo_runtime_cells or {}
 	vim.b[bufnr].marimo_projected = true
 	vim.b[bufnr].marimo_session_id = payload.session_id
+	vim.b[bufnr].marimo_cwd = payload.cwd
 	vim.b[bufnr].marimo_project_root = payload.project_root
 	vim.b[bufnr].marimo_runtime_kind = payload.runtime_kind
 	vim.b[bufnr].marimo_header = payload.header
@@ -19,6 +20,7 @@ end
 function M.clear_session(bufnr)
 	vim.b[bufnr].marimo_projected = false
 	vim.b[bufnr].marimo_session_id = nil
+	vim.b[bufnr].marimo_cwd = nil
 	vim.b[bufnr].marimo_project_root = nil
 	vim.b[bufnr].marimo_runtime_kind = nil
 	vim.b[bufnr].marimo_header = nil

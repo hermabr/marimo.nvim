@@ -36,6 +36,7 @@ def build_snapshot(path: Path, code: str = "x = 1\nx") -> dict[str, Any]:
     return {
         "session_id": str(path),
         "path": str(path),
+        "cwd": str(path.parent),
         "project_root": str(path.parent),
         "runtime_kind": "uv_project",
         "header": None,
@@ -76,11 +77,13 @@ def test_load_raw_notebook_returns_normalized_snapshot(tmp_path: Path) -> None:
     snapshot = load_raw_notebook(
         path=str(path),
         content=RAW_NOTEBOOK,
+        cwd=str(tmp_path),
         project_root=str(tmp_path),
         runtime_kind="uv_project",
     )
     assert snapshot.session_id == str(path)
     assert snapshot.path == str(path)
+    assert snapshot.cwd == str(tmp_path)
     assert snapshot.project_root == str(tmp_path)
     assert snapshot.runtime_kind == "uv_project"
     assert len(snapshot.cells) == 1

@@ -33,6 +33,7 @@ class SnapshotCell:
 class NotebookSnapshot:
     session_id: str
     path: str
+    cwd: str
     project_root: str
     runtime_kind: str
     header: str | None
@@ -44,6 +45,7 @@ class NotebookSnapshot:
         return cls(
             session_id=str(data["session_id"]),
             path=str(data["path"]),
+            cwd=str(data.get("cwd") or ""),
             project_root=str(data.get("project_root") or ""),
             runtime_kind=str(data.get("runtime_kind") or "uv"),
             header=data.get("header"),
@@ -55,6 +57,7 @@ class NotebookSnapshot:
         return {
             "session_id": self.session_id,
             "path": self.path,
+            "cwd": self.cwd,
             "project_root": self.project_root,
             "runtime_kind": self.runtime_kind,
             "header": self.header,
