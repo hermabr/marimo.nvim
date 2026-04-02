@@ -260,10 +260,12 @@ def test_kernel_bridge_uses_uv_with_marimo(monkeypatch: Any, tmp_path: Path) -> 
     bridge.launch()
 
     assert captured["cmd"][:4] == ["uv", "run", "--project", str(tmp_path)]
+    assert "--directory" not in captured["cmd"]
     assert captured["cmd"].count("--with") == 2
     assert "marimo" in captured["cmd"]
     assert "pyzmq" in captured["cmd"]
     assert captured["cmd"][-2:] == ["-m", "marimo._ipc.launch_kernel"]
+    assert captured["kwargs"]["cwd"] == str(tmp_path.resolve())
 
 
 def test_worker_run_cells_forwards_raw_operation_events(tmp_path: Path) -> None:
