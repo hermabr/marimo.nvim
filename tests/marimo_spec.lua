@@ -625,6 +625,24 @@ local function test_mode_toggle_keymap_callback_works()
 	assert_eq(vim.api.nvim_buf_get_lines(0, 0, 1, false)[1], "# + {marimo}")
 end
 
+local function test_execution_toggle_keymap_callback_works()
+	local path = make_path("execution_toggle_keymap.py")
+	write_file(path, "# + {marimo}\n\nx = 1\nx")
+	edit(path)
+
+	vim.cmd("Marimo on")
+	assert_eq(marimo.execution_mode(0), "eager")
+
+	local toggle_map = vim.fn.maparg("<leader>ml", "n", false, true)
+	assert_truthy(type(toggle_map.callback) == "function", "expected <leader>ml callback")
+
+	toggle_map.callback()
+	assert_eq(marimo.execution_mode(0), "lazy")
+
+	toggle_map.callback()
+	assert_eq(marimo.execution_mode(0), "eager")
+end
+
 local function test_run_current_cell_keymap_callback_works()
 	local path = make_path("run_current_keymap.py")
 	write_file(path, "# + {marimo}\n\nx = 1\nx")
@@ -1780,6 +1798,123 @@ local function test_interrupt_clears_running_placeholder()
 	end, "timed out waiting for interrupt to clear running state", 5000)
 end
 
+local function test_lazy_execution_marks_stale_cells_without_autorun()
+	local path = make_path("lazy_execution_stale.py")
+	local counter_path = make_path("lazy_execution_counter.txt")
+	write_file(
+		path,
+		string.format(
+			[[
+# + {marimo}
+
+from pathlib import Path
+counter_path = Path(%q)
+counter = int(counter_path.read_text()) if counter_path.exists() else 0
+counter_path.write_text(str(counter + 1))
+x = 1
+x
+
+# +
+
+y = x + 1
+y
+]],
+			counter_path
+		)
+	)
+	edit(path)
+
+	marimo.setup({
+		execution = {
+			mode = "lazy",
+		},
+	})
+	vim.cmd("Marimo on")
+	vim.cmd("MarimoRunAll")
+	wait_for_match(" 1")
+	wait_for_match(" 2")
+	wait_for_truthy(function()
+		return read_file(counter_path) == "1"
+	end, "timed out waiting for initial lazy run")
+
+	for idx, line in ipairs(vim.api.nvim_buf_get_lines(0, 0, -1, false)) do
+		if line == "x = 1" then
+			vim.api.nvim_buf_set_lines(0, idx - 1, idx, false, { "x = 7" })
+			break
+		end
+	end
+	vim.api.nvim_exec_autocmds("TextChanged", { buffer = 0, modeline = false })
+
+	wait_for_truthy(function()
+		local cells = vim.b.marimo_cells or {}
+		local first_runtime = cells[1] and cells[1].runtime or {}
+		local second_runtime = cells[2] and cells[2].runtime or {}
+		return first_runtime.stale_inputs == true and second_runtime.stale_inputs == true
+	end, "timed out waiting for lazy stale markers", 2000)
+
+	vim.wait(1000, function()
+		return false
+	end, 20)
+
+	assert_eq(read_file(counter_path), "1")
+	local lines = table.concat(rendered_lines(), "\n")
+	local stale_count = select(2, lines:gsub("marimo stale", ""))
+	assert_eq(stale_count, 2)
+	assert_truthy(not lines:match(" 7"), "expected lazy edit to avoid rerunning changed cell")
+	assert_truthy(not lines:match(" 8"), "expected lazy edit to avoid rerunning dependent cell")
+end
+
+local function test_lazy_run_current_syncs_deleted_cells_before_execution()
+	local path = make_path("lazy_execution_deleted_sync.py")
+	write_file(
+		path,
+		"# + {marimo}\n\nx = 1\nx\n\n# +\n\ny = x + 1\ny\n\n# +\n\nz = y + 1\nz"
+	)
+	edit(path)
+
+	marimo.setup({
+		execution = {
+			mode = "lazy",
+		},
+	})
+	vim.cmd("Marimo on")
+	vim.cmd("MarimoRunAll")
+	wait_for_match(" 1")
+	wait_for_match(" 2")
+	wait_for_match(" 3")
+
+	vim.api.nvim_buf_set_lines(0, 0, -1, false, {
+		"# + {marimo}",
+		"",
+		"x = 1",
+		"x",
+		"",
+		"# +",
+		"",
+		"z = y + 1",
+		"z",
+	})
+	vim.api.nvim_exec_autocmds("TextChanged", { buffer = 0, modeline = false })
+
+	wait_for_truthy(function()
+		local cells = vim.b.marimo_cells or {}
+		local second_runtime = cells[2] and cells[2].runtime or {}
+		return second_runtime.stale_inputs == true
+	end, "timed out waiting for deleted dependent to become stale", 2000)
+
+	for idx, line in ipairs(vim.api.nvim_buf_get_lines(0, 0, -1, false)) do
+		if line == "z = y + 1" then
+			vim.api.nvim_win_set_cursor(0, { idx, 0 })
+			break
+		end
+	end
+	vim.cmd("MarimoRunCell")
+
+	wait_for_match("NameError", 7000)
+	local lines = table.concat(rendered_lines(), "\n")
+	assert_truthy(not lines:match(" 3"), "expected deleted upstream cell to be removed before rerunning")
+end
+
 marimo.setup()
 
 local tests = {
@@ -1801,6 +1936,7 @@ local tests = {
 	test_navigation_commands_jump_between_cells,
 	test_navigation_keymap_callbacks_work,
 	test_mode_toggle_keymap_callback_works,
+	test_execution_toggle_keymap_callback_works,
 	test_run_current_cell_keymap_callback_works,
 	test_run_all_cells_keymap_callback_works,
 	test_format_keymap_callback_works,
@@ -1847,6 +1983,8 @@ local tests = {
 	test_run_current_cell_does_not_recreate_unrelated_image_placements,
 	test_deactivation_clears_runtime_image_placements,
 	test_interrupt_clears_running_placeholder,
+	test_lazy_execution_marks_stale_cells_without_autorun,
+	test_lazy_run_current_syncs_deleted_cells_before_execution,
 }
 
 for _, test in ipairs(tests) do

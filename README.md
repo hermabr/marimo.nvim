@@ -51,8 +51,13 @@ your normal Neovim config.
 - Adds buffer-local editing keymaps for projected marimo buffers:
   `<leader>mf` formats the projected layout and `<leader>mm` toggles marimo
   mode for the buffer.
+- Adds a buffer-local execution toggle:
+  `<leader>ml` switches the current buffer between eager and lazy execution.
 - Adds a buffer-local disabled toggle for the current cell:
   `<leader>md` toggles `marimo_disabled` on the current projected cell.
+- Supports eager and lazy execution modes. Lazy mode keeps runtime execution on
+  `:MarimoRunCell` and `:MarimoRunAll`, and marks changed or dependent cells as
+  stale when you edit code.
 - Automatically creates a new trailing `# +` cell when jumping past the last
   cell.
 
@@ -62,6 +67,7 @@ You can also use:
 - `:MarimoCellNext`
 - `:MarimoRunCell`
 - `:MarimoRunAll`
+- `:MarimoExecution [eager|lazy]`
 - `:MarimoInterrupt`
 - `:MarimoOutput`
 - `:MarimoFormat`
@@ -70,8 +76,12 @@ The default keymaps can be changed or disabled in `setup`:
 
 ```lua
 require("marimo").setup({
+  execution = {
+    mode = "eager", -- or "lazy"
+  },
   keymaps = {
     mode_toggle = "<leader>mm",
+    execution_toggle = "<leader>ml",
     prev_cell = "[m",
     next_cell = "]m",
     run_cell = "<leader>mr",
@@ -83,6 +93,14 @@ require("marimo").setup({
   },
 })
 ```
+
+`execution.mode` sets the default for new buffers. You can switch the current
+buffer at runtime with `<leader>ml` or `:MarimoExecution`. With no arguments,
+`:MarimoExecution` toggles the current buffer between eager and lazy.
+
+In lazy mode, edit-time sync still updates the projected buffer and stale
+markers, but it does not queue runtime execution until you explicitly run a
+cell or the whole notebook.
 
 `<leader>mo` opens the current cell's output in a larger floating window you can scroll with normal motions. The float title shows the live runtime for a running cell, or how long it took after it finishes. If `snacks.image` is available, image outputs render there too.
 
