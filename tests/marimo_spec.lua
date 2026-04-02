@@ -1575,6 +1575,22 @@ local function test_runtime_outputs_include_stdout_after_html_output()
 	assert_matches(lines, " HEY")
 end
 
+local function test_runtime_uses_notebook_directory_as_cwd()
+	local dir = make_path("cwd_runtime")
+	local path = dir .. "/nested/notebook.py"
+	local expected_dir = vim.fn.resolve(dir .. "/nested")
+	vim.fn.mkdir(expected_dir, "p")
+	write_file(path, '# + {marimo}\n\nfrom pathlib import Path\nPath(".").resolve()')
+	edit(path)
+
+	vim.cmd("Marimo on")
+	vim.cmd("MarimoRunAll")
+	wait_for_match(vim.pesc(expected_dir))
+
+	local lines = table.concat(rendered_lines(), "\n")
+	assert_matches(lines, vim.pesc(expected_dir))
+end
+
 local function test_runtime_html_tables_are_summarized_as_text()
 	local path = make_path("runtime_html_table.py")
 	write_file(
@@ -1837,6 +1853,7 @@ local tests = {
 	test_reentering_buffer_does_not_rerun_runtime,
 	test_runtime_outputs_include_stdout,
 	test_runtime_outputs_include_stdout_after_html_output,
+	test_runtime_uses_notebook_directory_as_cwd,
 	test_runtime_html_tables_are_summarized_as_text,
 	test_runtime_markdown_html_is_summarized_as_text,
 	test_runtime_marimo_table_html_is_summarized_as_text,
