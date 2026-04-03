@@ -35,6 +35,7 @@ class Worker:
             content=str(params["content"]),
             project_root=str(params.get("project_root") or ""),
             runtime_kind=str(params.get("runtime_kind") or "uv"),
+            launch_cwd=str(params.get("launch_cwd") or ""),
         )
         return snapshot.to_dict()
 

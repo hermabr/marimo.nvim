@@ -72,6 +72,17 @@ local function edit(path)
 	vim.cmd("edit " .. vim.fn.fnameescape(path))
 end
 
+local function with_cwd(path, fn)
+	local previous = vim.fn.getcwd()
+	vim.cmd("cd " .. vim.fn.fnameescape(path))
+	local ok, result = xpcall(fn, debug.traceback)
+	vim.cmd("cd " .. vim.fn.fnameescape(previous))
+	if not ok then
+		error(result)
+	end
+	return result
+end
+
 local function wait_for_truthy(fn, message, timeout)
 	local matched = vim.wait(timeout or 5000, fn, 20)
 	assert_truthy(matched, message or "timed out waiting for condition")
@@ -1658,6 +1669,25 @@ local function test_runtime_outputs_include_stdout_after_html_output()
 	assert_matches(lines, " HEY")
 end
 
+local function test_runtime_uses_neovim_cwd_as_launch_cwd()
+	local dir = make_path("cwd_runtime")
+	local launch_dir = vim.fn.resolve(dir)
+	local notebook_dir = vim.fn.resolve(dir .. "/nested")
+	vim.fn.mkdir(notebook_dir, "p")
+	write_file(notebook_dir .. "/notebook.py", '# + {marimo}\n\nfrom pathlib import Path\nPath(".").resolve()')
+
+	with_cwd(launch_dir, function()
+		edit("nested/notebook.py")
+		vim.cmd("Marimo on")
+		vim.cmd("MarimoRunAll")
+		wait_for_match(vim.pesc(launch_dir))
+
+		local lines = table.concat(rendered_lines(), "\n")
+		assert_matches(lines, vim.pesc(launch_dir))
+		assert_truthy(not lines:match(vim.pesc(notebook_dir)), "expected runtime cwd to follow Neovim cwd, not notebook directory")
+	end)
+end
+
 local function test_runtime_html_tables_are_summarized_as_text()
 	local path = make_path("runtime_html_table.py")
 	write_file(
@@ -1709,6 +1739,42 @@ local function test_runtime_markdown_html_is_summarized_as_text()
 	assert_truthy(not lines:match("<span"), "expected markdown html wrapper to be stripped")
 	assert_truthy(not lines:match("<h1"), "expected markdown html headings to be stripped")
 	assert_truthy(not lines:match("%[html output%]"), "expected markdown html to render as text")
+end
+
+local function test_runtime_tracebacks_are_summarized_as_text()
+	local render = dofile(vim.fn.getcwd() .. "/lua/marimo/render.lua")
+	local path = make_path("runtime_traceback_html.py")
+	write_file(path, "# + {marimo}\n\nx = 1")
+	edit(path)
+
+	render.render(0, {
+		{
+			id = "cell-1",
+			projection_range = { start_line = 1, end_line = 3 },
+			runtime = {
+				output = {
+					mimetype = "text/plain",
+					data = "",
+				},
+				console = {
+					{
+						channel = "stderr",
+						mimetype = "application/vnd.marimo+traceback",
+						data = '<span class="codehilite"><pre>Traceback (most recent call last):\n  File "/tmp/__marimo__cell.py", line 1, in &lt;module&gt;\n    raise ValueError(&quot;boom&quot;)\nValueError: boom\n</pre></span>',
+					},
+				},
+			},
+		},
+	})
+
+	local lines = table.concat(rendered_lines(), "\n")
+	assert_matches(lines, "Traceback %(most recent call last%)")
+	assert_matches(lines, 'File "/tmp/__marimo__cell%.py", line 1, in <module>')
+	assert_matches(lines, 'raise ValueError%("boom"%)')
+	assert_matches(lines, "ValueError: boom")
+	assert_truthy(not lines:match("<span"), "expected traceback html wrapper to be stripped")
+	assert_truthy(not lines:match("<pre"), "expected traceback pre tag to be stripped")
+	assert_truthy(not lines:match("codehilite"), "expected traceback styling class to be stripped")
 end
 
 local function test_runtime_marimo_table_html_is_summarized_as_text()
@@ -2039,8 +2105,10 @@ local tests = {
 	test_reentering_buffer_does_not_rerun_runtime,
 	test_runtime_outputs_include_stdout,
 	test_runtime_outputs_include_stdout_after_html_output,
+	test_runtime_uses_neovim_cwd_as_launch_cwd,
 	test_runtime_html_tables_are_summarized_as_text,
 	test_runtime_markdown_html_is_summarized_as_text,
+	test_runtime_tracebacks_are_summarized_as_text,
 	test_runtime_marimo_table_html_is_summarized_as_text,
 	test_runtime_errors_include_descriptive_stderr_context,
 	test_runtime_errors_show_multiple_definition_details,

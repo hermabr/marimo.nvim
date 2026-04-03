@@ -51,8 +51,14 @@ class KernelBridge:
         )
 
     @staticmethod
-    def _plugin_root() -> str:
-        return str(Path(__file__).resolve().parent.parent)
+    def _launch_cwd(snapshot: NotebookSnapshot) -> str:
+        if snapshot.launch_cwd:
+            return str(Path(snapshot.launch_cwd).resolve())
+        if snapshot.path:
+            return str(Path(snapshot.path).resolve().parent)
+        if snapshot.project_root:
+            return str(Path(snapshot.project_root).resolve())
+        return os.getcwd()
 
     def launch(self) -> None:
         cmd = ["uv", "run"]
@@ -60,8 +66,6 @@ class KernelBridge:
             cmd.extend(["--project", self.snapshot.project_root])
         cmd.extend(
             [
-                "--directory",
-                self._plugin_root(),
                 "--with",
                 "marimo",
                 "--with",
@@ -77,6 +81,7 @@ class KernelBridge:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             env=os.environ.copy(),
+            cwd=self._launch_cwd(self.snapshot),
         )
 
         assert self.process.stdin is not None
