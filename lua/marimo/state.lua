@@ -29,6 +29,14 @@ function M.execution_mode(bufnr)
 	return "eager"
 end
 
+function M.default_execution_mode()
+	local global_mode = vim.g.marimo_execution_mode
+	if type(global_mode) == "string" and execution_modes[global_mode] then
+		return global_mode
+	end
+	return "eager"
+end
+
 function M.is_lazy_execution(bufnr)
 	return M.execution_mode(bufnr) == "lazy"
 end

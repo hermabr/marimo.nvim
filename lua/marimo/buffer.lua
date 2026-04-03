@@ -1476,6 +1476,11 @@ function M.cleanup_buffer(bufnr)
 	end
 end
 
+function M.refresh(bufnr)
+	bufnr = normalize_bufnr(bufnr)
+	refresh_cells(bufnr)
+end
+
 M._private = {
 	set_write_projection_async = function(fn)
 		serialize_notebook_async = fn or worker.request_isolated_async

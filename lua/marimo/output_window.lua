@@ -267,6 +267,7 @@ local function configure_buffer(bufnr)
 	vim.bo[bufnr].swapfile = false
 	vim.bo[bufnr].modifiable = false
 	vim.bo[bufnr].filetype = "marimo-output"
+	vim.b[bufnr].marimo_output_float = true
 end
 
 local function configure_window(winid, window_opts)

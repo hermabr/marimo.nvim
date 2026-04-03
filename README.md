@@ -102,6 +102,13 @@ In lazy mode, edit-time sync still updates the projected buffer and stale
 markers, but it does not queue runtime execution until you explicitly run a
 cell or the whole notebook.
 
+Projected marimo buffers show a small text-only floating indicator in the
+top-right corner of the window:
+
+- `marimo` while the current buffer is using its default execution mode
+- `marimo (lazy)` if your default is eager and the current buffer has been switched to lazy
+- `marimo (eager)` if your default is lazy and the current buffer has been switched back to eager
+
 `<leader>mo` opens the current cell's output in a larger floating window you can scroll with normal motions. The float title shows the live runtime for a running cell, or how long it took after it finishes. If `snacks.image` is available, image outputs render there too.
 
 ## Test

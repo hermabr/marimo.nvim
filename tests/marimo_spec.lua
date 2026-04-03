@@ -53,6 +53,8 @@ end
 
 local rendered_lines
 local wait_for_match
+local find_output_floating_window
+local find_indicator_floating_window
 
 local temp_root = vim.fn.tempname()
 vim.fn.mkdir(temp_root, "p")
@@ -615,14 +617,25 @@ local function test_mode_toggle_keymap_callback_works()
 	local toggle_map = vim.fn.maparg("<leader>mm", "n", false, true)
 	assert_truthy(type(toggle_map.callback) == "function", "expected <leader>mm callback")
 	assert_truthy(vim.b.marimo_projected)
+	local indicator_win = find_indicator_floating_window()
+	assert_truthy(indicator_win ~= nil, "expected indicator float in default mode")
+	local config = vim.api.nvim_win_get_config(indicator_win)
+	assert_eq(config.relative, "win")
+	assert_eq(config.anchor, "NE")
+	assert_truthy(config.border == nil or config.border == "", "expected indicator float without a border")
+	assert_eq(vim.api.nvim_buf_get_lines(vim.api.nvim_win_get_buf(indicator_win), 0, -1, false)[1], "marimo")
 
 	toggle_map.callback()
 	assert_truthy(not vim.b.marimo_projected)
 	assert_eq(vim.api.nvim_buf_get_lines(0, 0, -1, false)[1], "x = 1")
+	assert_truthy(find_indicator_floating_window() == nil, "expected indicator float to close")
 
 	toggle_map.callback()
 	assert_truthy(vim.b.marimo_projected)
 	assert_eq(vim.api.nvim_buf_get_lines(0, 0, 1, false)[1], "# + {marimo}")
+	indicator_win = find_indicator_floating_window()
+	assert_truthy(indicator_win ~= nil, "expected indicator float after reactivation in default mode")
+	assert_eq(vim.api.nvim_buf_get_lines(vim.api.nvim_win_get_buf(indicator_win), 0, -1, false)[1], "marimo")
 end
 
 local function test_execution_toggle_keymap_callback_works()
@@ -638,9 +651,46 @@ local function test_execution_toggle_keymap_callback_works()
 
 	toggle_map.callback()
 	assert_eq(marimo.execution_mode(0), "lazy")
+	local indicator_win = find_indicator_floating_window()
+	assert_truthy(indicator_win ~= nil, "expected indicator float in lazy mode")
+	assert_eq(vim.api.nvim_buf_get_lines(vim.api.nvim_win_get_buf(indicator_win), 0, -1, false)[1], "marimo (lazy)")
+	local config = vim.api.nvim_win_get_config(indicator_win)
+	assert_eq(config.relative, "win")
+	assert_eq(config.anchor, "NE")
+	assert_truthy(config.border == nil or config.border == "", "expected indicator float without a border")
 
 	toggle_map.callback()
 	assert_eq(marimo.execution_mode(0), "eager")
+	indicator_win = find_indicator_floating_window()
+	assert_truthy(indicator_win ~= nil, "expected indicator float in eager mode")
+	assert_eq(vim.api.nvim_buf_get_lines(vim.api.nvim_win_get_buf(indicator_win), 0, -1, false)[1], "marimo")
+end
+
+local function test_indicator_shows_eager_when_default_is_lazy()
+	local path = make_path("indicator_default_lazy.py")
+	write_file(path, "# + {marimo}\n\nx = 1\nx")
+	edit(path)
+
+	marimo.setup({
+		execution = {
+			mode = "lazy",
+		},
+	})
+	vim.cmd("Marimo on")
+	local indicator_win = find_indicator_floating_window()
+	assert_truthy(indicator_win ~= nil, "expected indicator float in lazy default mode")
+	assert_eq(vim.api.nvim_buf_get_lines(vim.api.nvim_win_get_buf(indicator_win), 0, -1, false)[1], "marimo")
+
+	vim.cmd("MarimoExecution eager")
+	assert_eq(marimo.execution_mode(0), "eager")
+	indicator_win = find_indicator_floating_window()
+	assert_truthy(indicator_win ~= nil, "expected indicator float after eager override")
+	assert_eq(vim.api.nvim_buf_get_lines(vim.api.nvim_win_get_buf(indicator_win), 0, -1, false)[1], "marimo (eager)")
+	marimo.setup({
+		execution = {
+			mode = "eager",
+		},
+	})
 end
 
 local function test_run_current_cell_keymap_callback_works()
@@ -756,14 +806,29 @@ local function test_toggle_disabled_keymap_updates_marker_and_runtime_status()
 	end, "timed out waiting for enabled marker")
 end
 
-local function find_floating_window()
+local function find_floating_window(predicate)
 	for _, winid in ipairs(vim.api.nvim_list_wins()) do
 		local config = vim.api.nvim_win_get_config(winid)
 		if config.relative and config.relative ~= "" then
-			return winid
+			local bufnr = vim.api.nvim_win_get_buf(winid)
+			if predicate == nil or predicate(winid, bufnr, config) then
+				return winid
+			end
 		end
 	end
 	return nil
+end
+
+find_output_floating_window = function()
+	return find_floating_window(function(_, bufnr)
+		return vim.b[bufnr].marimo_output_float == true
+	end)
+end
+
+find_indicator_floating_window = function()
+	return find_floating_window(function(_, bufnr)
+		return vim.b[bufnr].marimo_indicator_float == true
+	end)
 end
 
 local function floating_window_title(winid)
@@ -800,7 +865,7 @@ local function test_output_keymap_opens_scrollable_float()
 	assert_truthy(type(output_map.callback) == "function", "expected <leader>mo callback")
 	output_map.callback()
 
-	local winid = find_floating_window()
+	local winid = find_output_floating_window()
 	assert_truthy(winid ~= nil, "expected output to open in a floating window")
 	local config = vim.api.nvim_win_get_config(winid)
 	assert_truthy(config.relative ~= "", "expected output to open in a floating window")
@@ -831,7 +896,7 @@ local function test_marimo_output_command_opens_current_cell_output()
 
 	vim.api.nvim_win_set_cursor(0, { 3, 0 })
 	vim.cmd("MarimoOutput")
-	local first_win = find_floating_window()
+	local first_win = find_output_floating_window()
 	assert_truthy(first_win ~= nil, "expected first output float")
 	local first_lines = vim.api.nvim_buf_get_lines(vim.api.nvim_win_get_buf(first_win), 0, -1, false)
 	assert_eq(first_lines[1], "hello")
@@ -839,7 +904,7 @@ local function test_marimo_output_command_opens_current_cell_output()
 
 	vim.api.nvim_win_set_cursor(0, { 7, 0 })
 	vim.cmd("MarimoOutput")
-	local second_win = find_floating_window()
+	local second_win = find_output_floating_window()
 	assert_truthy(second_win ~= nil, "expected second output float")
 	local second_lines = vim.api.nvim_buf_get_lines(vim.api.nvim_win_get_buf(second_win), 0, -1, false)
 	assert_eq(second_lines[1], "goodbye")
@@ -857,7 +922,7 @@ local function test_marimo_output_title_shows_last_runtime()
 
 	vim.api.nvim_win_set_cursor(0, { 3, 0 })
 	vim.cmd("MarimoOutput")
-	local winid = find_floating_window()
+	local winid = find_output_floating_window()
 	assert_truthy(winid ~= nil, "expected output float for runtime title test")
 	assert_matches(floating_window_title(winid), "took [0-9]", "expected completed runtime in output title")
 end
@@ -876,7 +941,7 @@ local function test_marimo_output_title_updates_current_runtime_while_running()
 
 	vim.api.nvim_win_set_cursor(0, { 3, 0 })
 	vim.cmd("MarimoOutput")
-	local winid = find_floating_window()
+	local winid = find_output_floating_window()
 	assert_truthy(winid ~= nil, "expected output float for running runtime title test")
 	wait_for_truthy(function()
 		return floating_window_title(winid):match("runtime [0-9]") ~= nil
@@ -907,7 +972,7 @@ local function test_marimo_output_preserves_relative_numbers_and_wraps_lines()
 	vim.api.nvim_win_set_cursor(0, { 3, 0 })
 	vim.cmd("MarimoOutput")
 
-	local float_win = find_floating_window()
+	local float_win = find_output_floating_window()
 	assert_truthy(float_win ~= nil, "expected output float for window option test")
 	assert_truthy(vim.wo[float_win].wrap, "expected output float to wrap long lines")
 	assert_truthy(vim.wo[float_win].number, "expected output float to keep line numbers")
@@ -938,7 +1003,7 @@ local function test_marimo_output_renders_images_in_float()
 		return #snacks_image_calls.new > initial_calls
 	end, "timed out waiting for float image placement")
 
-	local float_win = find_floating_window()
+	local float_win = find_output_floating_window()
 	assert_truthy(float_win ~= nil, "expected image output float")
 	local float_bufnr = vim.api.nvim_win_get_buf(float_win)
 	local call = snacks_image_calls.new[#snacks_image_calls.new]
@@ -1937,6 +2002,7 @@ local tests = {
 	test_navigation_keymap_callbacks_work,
 	test_mode_toggle_keymap_callback_works,
 	test_execution_toggle_keymap_callback_works,
+	test_indicator_shows_eager_when_default_is_lazy,
 	test_run_current_cell_keymap_callback_works,
 	test_run_all_cells_keymap_callback_works,
 	test_format_keymap_callback_works,
