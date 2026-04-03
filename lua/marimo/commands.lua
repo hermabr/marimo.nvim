@@ -76,6 +76,35 @@ function M.setup(opts)
 		api.run_all_cells(0)
 	end, {})
 
+	vim.api.nvim_create_user_command("MarimoExecution", function(command_opts)
+		local arg = vim.trim(command_opts.args)
+		local mode
+		if arg == "" then
+			local ok, next_mode = api.toggle_execution_mode(0)
+			if not ok then
+				util.notify(next_mode, vim.log.levels.WARN)
+				return
+			end
+			mode = next_mode
+		elseif arg == "eager" or arg == "lazy" then
+			local ok, next_mode = api.set_execution_mode(arg, 0)
+			if not ok then
+				util.notify(next_mode, vim.log.levels.WARN)
+				return
+			end
+			mode = next_mode
+		else
+			util.notify("usage: MarimoExecution [eager|lazy]", vim.log.levels.ERROR)
+			return
+		end
+		util.notify(string.format("marimo execution: %s", mode))
+	end, {
+		nargs = "?",
+		complete = function()
+			return { "eager", "lazy" }
+		end,
+	})
+
 	vim.api.nvim_create_user_command("MarimoOutput", function()
 		api.open_current_output(0)
 	end, {})
