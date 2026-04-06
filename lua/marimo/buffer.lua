@@ -74,6 +74,20 @@ local function stop_autorun_timer(bufnr)
 	end
 end
 
+local function cancel_active_runtime_request(bufnr)
+	local entry = state_for(bufnr)
+	local active = entry.runtime_request
+	if not active then
+		return nil
+	end
+	entry.runtime_request = nil
+	local filepath = vim.api.nvim_buf_get_name(bufnr)
+	if filepath ~= "" then
+		worker.finish_request(filepath, active.request_id)
+	end
+	return active
+end
+
 local function runtime_started(bufnr)
 	if vim.b[bufnr].marimo_runtime_enabled == true then
 		return true
@@ -410,6 +424,12 @@ local function clear_running_runtime_state(bufnr)
 	})
 end
 
+local function clear_runtime_outputs(bufnr)
+	vim.b[bufnr].marimo_runtime_cells = {}
+	vim.b[bufnr].marimo_runtime_enabled = false
+	refresh_cells(bufnr)
+end
+
 local function runtime_has_pending_work(bufnr)
 	for _, cell_runtime in pairs(vim.b[bufnr].marimo_runtime_cells or {}) do
 		if cell_runtime.status == "queued" or cell_runtime.status == "running" then
@@ -555,6 +575,9 @@ local function submit_runtime_request(bufnr, request)
 end
 
 flush_runtime_queue = function(bufnr)
+	if not vim.api.nvim_buf_is_valid(bufnr) then
+		return
+	end
 	local entry = state_for(bufnr)
 	if entry.runtime_request ~= nil then
 		if settle_completed_runtime_request(bufnr) then
@@ -589,13 +612,17 @@ local function send_interrupt_request(bufnr, cancelled_request_id)
 		cancel_request_id = cancelled_request_id,
 	}, function(payload, request_err)
 		local current = runtime_state[bufnr]
-		if current and current.interrupt_in_flight == interrupt_token then
+		local is_active = current and current.interrupt_in_flight == interrupt_token
+		if is_active then
 			current.interrupt_in_flight = nil
 		end
+		worker.finish_request(filepath, interrupt_request_id)
+		if not is_active then
+			return
+		end
 		if request_err then
-			worker.finish_request(filepath, interrupt_request_id)
 			util.notify(request_err, vim.log.levels.ERROR)
-			if current and vim.api.nvim_buf_is_valid(bufnr) then
+			if vim.api.nvim_buf_is_valid(bufnr) then
 				flush_runtime_queue(bufnr)
 			end
 			return
@@ -603,8 +630,7 @@ local function send_interrupt_request(bufnr, cancelled_request_id)
 		if payload and payload.session_id and vim.api.nvim_buf_is_valid(bufnr) then
 			vim.b[bufnr].marimo_runtime_enabled = true
 		end
-		worker.finish_request(filepath, interrupt_request_id)
-		if current and vim.api.nvim_buf_is_valid(bufnr) then
+		if vim.api.nvim_buf_is_valid(bufnr) then
 			vim.defer_fn(function()
 				if runtime_state[bufnr] == current and vim.api.nvim_buf_is_valid(bufnr) then
 					flush_runtime_queue(bufnr)
@@ -624,14 +650,10 @@ local function prepare_runtime_invalidation(bufnr)
 end
 
 local function interrupt_active_runtime_for_invalidation(bufnr)
-	local entry = state_for(bufnr)
-	local interrupted_request = entry.runtime_request
+	local interrupted_request = cancel_active_runtime_request(bufnr)
 	if not interrupted_request then
 		return
 	end
-	local filepath = vim.api.nvim_buf_get_name(bufnr)
-	entry.runtime_request = nil
-	worker.finish_request(filepath, interrupted_request.request_id)
 	clear_running_runtime_state(bufnr)
 	send_interrupt_request(bufnr, interrupted_request.request_id)
 end
@@ -1168,16 +1190,80 @@ function M.interrupt(bufnr)
 	then
 		return
 	end
-	local filepath = vim.api.nvim_buf_get_name(bufnr)
 	entry.pending_sync = nil
 	entry.pending_run = nil
 	entry.stale_followup_token = entry.stale_followup_token + 1
-	if interrupted_request then
-		entry.runtime_request = nil
-		worker.finish_request(filepath, interrupted_request.request_id)
-	end
+	interrupted_request = cancel_active_runtime_request(bufnr)
 	clear_running_runtime_state(bufnr)
 	send_interrupt_request(bufnr, interrupted_request and interrupted_request.request_id or nil)
+end
+
+function M.restart(bufnr)
+	bufnr = normalize_bufnr(bufnr)
+	if not vim.b[bufnr].marimo_projected or not vim.b[bufnr].marimo_session_id then
+		return
+	end
+	stop_autorun_timer(bufnr)
+	local synced_snapshot, _, _, _, _, err = sync_context_from_buffer(bufnr, {
+		update_buffer_lines = false,
+	})
+	if err then
+		util.notify("failed to restart marimo kernel: " .. err, vim.log.levels.ERROR)
+		return
+	end
+	local filepath = vim.api.nvim_buf_get_name(bufnr)
+	local session_id = vim.b[bufnr].marimo_session_id
+	local entry = state_for(bufnr)
+	entry.pending_sync = nil
+	entry.pending_run = nil
+	entry.stale_followup_token = entry.stale_followup_token + 1
+	entry.interrupt_token = entry.interrupt_token + 1
+	entry.interrupt_in_flight = nil
+	cancel_active_runtime_request(bufnr)
+	clear_runtime_outputs(bufnr)
+	close_session_async(filepath, session_id, function(_, close_err)
+		if close_err then
+			util.notify("failed to restart marimo kernel: " .. close_err, vim.log.levels.ERROR)
+			return
+		end
+		if not vim.api.nvim_buf_is_valid(bufnr)
+			or not vim.b[bufnr].marimo_projected
+			or vim.b[bufnr].marimo_session_id ~= session_id
+		then
+			return
+		end
+		worker.request_async(filepath, "ensure_session", {
+			snapshot = synced_snapshot,
+		}, function(payload, restart_err)
+			if restart_err then
+				util.notify("failed to restart marimo kernel: " .. restart_err, vim.log.levels.ERROR)
+				return
+			end
+			if not vim.api.nvim_buf_is_valid(bufnr)
+				or not vim.b[bufnr].marimo_projected
+				or vim.b[bufnr].marimo_session_id ~= session_id
+			then
+				return
+			end
+			if payload and payload.session_id then
+				vim.b[bufnr].marimo_runtime_enabled = true
+				util.notify("marimo kernel restarted")
+			end
+		end)
+	end)
+end
+
+function M.confirm_restart(bufnr)
+	bufnr = normalize_bufnr(bufnr)
+	if not vim.b[bufnr].marimo_projected or not vim.b[bufnr].marimo_session_id then
+		return false
+	end
+	local choice = vim.fn.confirm("Restart marimo kernel? [Y/n]", "&Yes\n&No", 1)
+	if choice ~= 1 then
+		return false
+	end
+	M.restart(bufnr)
+	return true
 end
 
 local function update_cell_marker(bufnr, cell, mutate)

@@ -18,6 +18,7 @@ local setup_opts = {
 		next_cell = "]m",
 		run_cell = "<leader>mr",
 		run_all_cells = "<leader>mR",
+		restart = "<leader>mk",
 		interrupt = "<leader>mi",
 		format = "<leader>mf",
 		toggle_disabled = "<leader>md",
@@ -106,6 +107,11 @@ local function ensure_navigation_keymaps(bufnr)
 			M.run_all_cells(bufnr)
 		end, { buffer = bufnr, silent = true, desc = "Marimo: run all cells" })
 	end
+	if keymaps.restart then
+		vim.keymap.set("n", keymaps.restart, function()
+			M.confirm_restart(bufnr)
+		end, { buffer = bufnr, silent = true, desc = "Marimo: restart kernel" })
+	end
 	if keymaps.interrupt then
 		vim.keymap.set("n", keymaps.interrupt, function()
 			M.interrupt(bufnr)
@@ -151,6 +157,8 @@ M.sync_buffer = buffer.sync_buffer
 M.format_buffer = buffer.format_buffer
 M.run_current_cell = buffer.run_current_cell
 M.run_all_cells = buffer.run_all_cells
+M.restart = buffer.restart
+M.confirm_restart = buffer.confirm_restart
 M.toggle_current_cell_disabled = buffer.toggle_current_cell_disabled
 M.open_current_output = buffer.open_current_output
 M.interrupt = buffer.interrupt

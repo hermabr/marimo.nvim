@@ -81,6 +81,27 @@ local function with_cwd(path, fn)
 	return result
 end
 
+local function with_confirm_result(result, fn)
+	local original = vim.fn.confirm
+	local calls = {}
+	vim.fn.confirm = function(message, buttons, default)
+		table.insert(calls, {
+			message = message,
+			buttons = buttons,
+			default = default,
+		})
+		return result
+	end
+	local ok, value = xpcall(function()
+		return fn(calls)
+	end, debug.traceback)
+	vim.fn.confirm = original
+	if not ok then
+		error(value)
+	end
+	return value
+end
+
 local function wait_for_truthy(fn, message, timeout)
 	local matched = vim.wait(timeout or 5000, fn, 20)
 	assert_truthy(matched, message or "timed out waiting for condition")
@@ -664,6 +685,56 @@ local function test_run_all_cells_keymap_callback_works()
 
 	wait_for_match(" 1")
 	wait_for_match(" 2")
+end
+
+local function test_restart_command_restarts_kernel_after_confirmation()
+	local path = make_path("restart_command.py")
+	write_file(path, '# + {marimo}\n\ncounter = globals().get("counter", 40) + 2\ncounter')
+	edit(path)
+
+	vim.cmd("Marimo on")
+	vim.cmd("MarimoRunAll")
+	wait_for_match(" 42")
+
+	with_confirm_result(1, function(calls)
+		vim.cmd("MarimoRestart")
+		assert_eq(#calls, 1)
+		assert_eq(calls[1].message, "Restart marimo kernel? [Y/n]")
+		assert_eq(calls[1].buttons, "&Yes\n&No")
+		assert_eq(calls[1].default, 1)
+	end)
+
+	wait_for_truthy(function()
+		return vim.b.marimo_runtime_enabled == true and next(vim.b.marimo_runtime_cells or {}) == nil
+	end, "timed out waiting for marimo kernel restart")
+
+	vim.cmd("MarimoRunAll")
+	wait_for_truthy(function()
+		local lines = table.concat(rendered_lines(), "\n")
+		return lines:match(" 42") ~= nil and lines:match(" 44") == nil
+	end, "timed out waiting for rerun after restart")
+end
+
+local function test_restart_keymap_callback_respects_confirmation()
+	local path = make_path("restart_keymap.py")
+	write_file(path, '# + {marimo}\n\ncounter = globals().get("counter", 40) + 2\ncounter')
+	edit(path)
+
+	vim.cmd("Marimo on")
+	vim.cmd("MarimoRunAll")
+	wait_for_match(" 42")
+
+	local restart_map = vim.fn.maparg("<leader>mk", "n", false, true)
+	assert_truthy(type(restart_map.callback) == "function", "expected <leader>mk callback")
+
+	with_confirm_result(2, function(calls)
+		restart_map.callback()
+		assert_eq(#calls, 1)
+		assert_eq(calls[1].message, "Restart marimo kernel? [Y/n]")
+	end)
+	assert_truthy(vim.b.marimo_runtime_enabled == true, "expected declined restart to keep runtime enabled")
+	assert_truthy(next(vim.b.marimo_runtime_cells or {}) ~= nil, "expected declined restart to keep runtime state")
+	wait_for_match(" 42")
 end
 
 local function test_format_keymap_callback_works()
@@ -1869,6 +1940,8 @@ local tests = {
 	test_mode_toggle_keymap_callback_works,
 	test_run_current_cell_keymap_callback_works,
 	test_run_all_cells_keymap_callback_works,
+	test_restart_command_restarts_kernel_after_confirmation,
+	test_restart_keymap_callback_respects_confirmation,
 	test_format_keymap_callback_works,
 	test_interrupt_keymap_callback_works,
 	test_toggle_disabled_keymap_updates_marker_and_runtime_status,
