@@ -1076,22 +1076,22 @@ function M.project_buffer(bufnr, opts)
 	opts = opts or {}
 	bufnr = normalize_bufnr(bufnr)
 	if not state.is_enabled(bufnr) then
-		return
+		return false
 	end
 	if vim.b[bufnr].marimo_projected then
 		util.notify("already projected: " .. vim.fn.fnamemodify(vim.api.nvim_buf_get_name(bufnr), ":~:."))
-		return
+		return false
 	end
 	if not is_file_buffer(bufnr) then
 		util.notify("current buffer is not a file buffer", vim.log.levels.WARN)
-		return
+		return false
 	end
 	local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
 	if not markers.looks_like_marimo(lines) then
 		util.notify("no marimo notebook detected in " .. vim.fn.fnamemodify(vim.api.nvim_buf_get_name(bufnr), ":~:."), vim.log.levels.WARN)
-		return
+		return false
 	end
-	open_raw_notebook(bufnr, opts)
+	return open_raw_notebook(bufnr, opts)
 end
 
 function M.write_buffer(bufnr)
@@ -1423,18 +1423,17 @@ function M.activate(bufnr, opts)
 	bufnr = normalize_bufnr(bufnr)
 	if not state.is_enabled(bufnr) then
 		util.notify("marimo mode is disabled for this buffer", vim.log.levels.WARN)
-		return
+		return false
 	end
 	if not is_file_buffer(bufnr) then
 		util.notify("current buffer is not a file buffer", vim.log.levels.WARN)
-		return
+		return false
 	end
 	local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
 	local filepath = vim.api.nvim_buf_get_name(bufnr)
 	local project_root, runtime_kind, launch_cwd = runtime_metadata(bufnr)
 	if markers.looks_like_marimo(lines) then
-		M.project_buffer(bufnr, opts)
-		return
+		return M.project_buffer(bufnr, opts)
 	end
 	if markers.looks_like_projected(lines) then
 		local ok, snapshot, projected_lines = pcall(snapshot_state.snapshot_from_projected_lines, {
@@ -1450,19 +1449,18 @@ function M.activate(bufnr, opts)
 		})
 		if not ok then
 			util.notify(snapshot, vim.log.levels.WARN)
-			return
+			return false
 		end
-		open_local_snapshot(bufnr, snapshot, projected_lines, vim.tbl_extend("force", opts, {
+		return open_local_snapshot(bufnr, snapshot, projected_lines, vim.tbl_extend("force", opts, {
 			update_buffer_lines = false,
 		}))
-		return
 	end
 	if markers.has_any_projected_markers(lines) then
 		if opts.manual then
 			local promoted, changed = markers.promote_first_marker_to_marimo(lines)
 			if not changed then
 				util.notify("buffer is neither a real marimo notebook nor a projected `# +` notebook", vim.log.levels.WARN)
-				return
+				return false
 			end
 			local ok, snapshot, projected_lines = pcall(snapshot_state.snapshot_from_projected_lines, {
 				session_id = filepath,
@@ -1477,13 +1475,13 @@ function M.activate(bufnr, opts)
 			})
 			if not ok then
 				util.notify(snapshot, vim.log.levels.WARN)
-				return
+				return false
 			end
-			open_local_snapshot(bufnr, snapshot, projected_lines, vim.tbl_extend("force", opts, {
+			return open_local_snapshot(bufnr, snapshot, projected_lines, vim.tbl_extend("force", opts, {
 				update_buffer_lines = true,
 			}))
 		end
-		return
+		return false
 	end
 	if opts.manual then
 		local ok, snapshot, projected_lines = pcall(snapshot_state.snapshot_from_manual_python, {
@@ -1497,14 +1495,14 @@ function M.activate(bufnr, opts)
 		})
 		if not ok then
 			util.notify(snapshot, vim.log.levels.WARN)
-			return
+			return false
 		end
-		open_local_snapshot(bufnr, snapshot, projected_lines, vim.tbl_extend("force", opts, {
+		return open_local_snapshot(bufnr, snapshot, projected_lines, vim.tbl_extend("force", opts, {
 			update_buffer_lines = true,
 		}))
-		return
 	end
 	util.notify("buffer is neither a real marimo notebook nor a projected `# +` notebook", vim.log.levels.WARN)
+	return false
 end
 
 function M.reconcile_buffer(bufnr, opts)
@@ -1547,14 +1545,20 @@ end
 function M.set_mode(enabled, opts)
 	opts = opts or {}
 	local bufnr = normalize_bufnr(opts.bufnr)
+	local previous_mode = vim.b[bufnr].marimo_mode
 	vim.b[bufnr].marimo_mode = enabled
 	if enabled then
-		M.activate(bufnr, opts)
+		local ok = M.activate(bufnr, opts)
+		if not ok then
+			vim.b[bufnr].marimo_mode = previous_mode
+			return false
+		end
 		return true
 	end
 	if vim.b[bufnr].marimo_projected then
 		local ok, err = M.reload_raw_buffer(bufnr)
 		if not ok then
+			vim.b[bufnr].marimo_mode = previous_mode
 			return ok, err
 		end
 		M.cleanup_buffer(bufnr)

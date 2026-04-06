@@ -451,6 +451,7 @@ local function test_failed_deactivation_keeps_worker_session_alive()
 
 	vim.cmd("Marimo")
 	assert_truthy(vim.b.marimo_projected)
+	assert_eq(vim.b.marimo_mode, true)
 	local session_id = vim.b.marimo_session_id
 
 	vim.api.nvim_buf_set_lines(0, -1, -1, false, { "", "extra = 1" })
@@ -459,6 +460,7 @@ local function test_failed_deactivation_keeps_worker_session_alive()
 	vim.cmd("Marimo")
 	assert_truthy(vim.b.marimo_projected)
 	assert_eq(vim.b.marimo_session_id, session_id)
+	assert_eq(vim.b.marimo_mode, true)
 
 	vim.cmd("write")
 	wait_for_truthy(function()
@@ -476,6 +478,7 @@ local function test_manual_activation_rejects_unnamed_buffers()
 	vim.cmd("Marimo")
 	assert_truthy(not vim.b.marimo_projected)
 	assert_eq(vim.b.marimo_session_id, nil)
+	assert_eq(vim.b.marimo_mode, nil)
 end
 
 local function test_manual_activation_preserves_dirty_state()

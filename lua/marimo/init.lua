@@ -122,11 +122,14 @@ local function ensure_navigation_keymaps(bufnr)
 	local keymaps = setup_opts.keymaps or {}
 	if keymaps.mode_toggle then
 		vim.keymap.set("n", keymaps.mode_toggle, function()
-			M.set_mode(not vim.b[bufnr].marimo_projected, {
+			local ok, err = M.set_mode(not vim.b[bufnr].marimo_projected, {
 				bufnr = bufnr,
 				manual = true,
 				ensure_projected_buffer_setup = ensure_projected_buffer_setup,
 			})
+			if not ok and err then
+				util.notify(err, vim.log.levels.WARN)
+			end
 		end, { buffer = bufnr, silent = true, desc = "Marimo: toggle mode" })
 	end
 	if keymaps.execution_toggle then
