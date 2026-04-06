@@ -4,6 +4,7 @@ local util = dofile(dir .. "/util.lua")
 local markers = dofile(dir .. "/markers.lua")
 local state = dofile(dir .. "/state.lua")
 local buffer = dofile(dir .. "/buffer.lua")
+local indicator_window = dofile(dir .. "/indicator_window.lua")
 local commands = dofile(dir .. "/commands.lua")
 local worker = dofile(dir .. "/worker.lua")
 local navigation = dofile(dir .. "/navigation.lua")
@@ -12,8 +13,12 @@ local M = {}
 
 local group = vim.api.nvim_create_augroup("marimo.nvim", { clear = true })
 local setup_opts = {
+	execution = {
+		mode = "eager",
+	},
 	keymaps = {
 		mode_toggle = "<leader>mm",
+		execution_toggle = "<leader>ml",
 		prev_cell = "[m",
 		next_cell = "]m",
 		run_cell = "<leader>mr",
@@ -25,6 +30,43 @@ local setup_opts = {
 		show_output = "<leader>mo",
 	},
 }
+
+local function normalize_bufnr(bufnr)
+	if bufnr == nil or bufnr == 0 then
+		return vim.api.nvim_get_current_buf()
+	end
+	return bufnr
+end
+
+local function statusline_label(bufnr)
+	bufnr = normalize_bufnr(bufnr)
+	if not vim.b[bufnr].marimo_projected then
+		return nil
+	end
+	local current_mode = state.execution_mode(bufnr)
+	local default_mode = state.default_execution_mode()
+	if current_mode == default_mode then
+		return "marimo"
+	end
+	if current_mode == "lazy" then
+		return "marimo (lazy)"
+	end
+	if current_mode == "eager" then
+		return "marimo (eager)"
+	end
+	return "marimo"
+end
+
+local function refresh_indicator(bufnr)
+	bufnr = normalize_bufnr(bufnr)
+	indicator_window.refresh_buffer(bufnr, statusline_label)
+	util.request_redraw()
+end
+
+local function reconcile_indicators()
+	indicator_window.reconcile(statusline_label)
+	util.request_redraw()
+end
 
 local function ensure_write_autocmd(bufnr)
 	if vim.b[bufnr].marimo_write_hook then
@@ -87,6 +129,11 @@ local function ensure_navigation_keymaps(bufnr)
 			})
 		end, { buffer = bufnr, silent = true, desc = "Marimo: toggle mode" })
 	end
+	if keymaps.execution_toggle then
+		vim.keymap.set("n", keymaps.execution_toggle, function()
+			M.toggle_execution_mode(bufnr)
+		end, { buffer = bufnr, silent = true, desc = "Marimo: toggle execution mode" })
+	end
 	if keymaps.prev_cell then
 		vim.keymap.set("n", keymaps.prev_cell, function()
 			M.jump_prev_cell(bufnr)
@@ -144,6 +191,21 @@ local function ensure_projected_buffer_setup(bufnr)
 	ensure_sync_autocmd(bufnr)
 	ensure_reconcile_autocmd(bufnr)
 	ensure_navigation_keymaps(bufnr)
+	refresh_indicator(bufnr)
+end
+
+local function normalize_execution_opts(opts)
+	local execution = vim.deepcopy(opts or {})
+	local mode = execution.mode
+	if mode == nil and type(execution.lazy) == "boolean" then
+		mode = execution.lazy and "lazy" or "eager"
+	end
+	if mode ~= nil and mode ~= "eager" and mode ~= "lazy" then
+		error("marimo.setup execution.mode must be 'eager' or 'lazy'")
+	end
+	execution.mode = mode or "eager"
+	execution.lazy = nil
+	return execution
 end
 
 M.project_buffer = function(bufnr, opts)
@@ -162,6 +224,29 @@ M.confirm_restart = buffer.confirm_restart
 M.toggle_current_cell_disabled = buffer.toggle_current_cell_disabled
 M.open_current_output = buffer.open_current_output
 M.interrupt = buffer.interrupt
+M.execution_mode = state.execution_mode
+M.statusline = function(bufnr)
+	bufnr = normalize_bufnr(bufnr)
+	local label = statusline_label(bufnr)
+	return label and (" " .. label .. " ") or ""
+end
+M.status = M.statusline
+M.set_execution_mode = function(mode, bufnr)
+	bufnr = normalize_bufnr(bufnr)
+	local ok, next_mode = state.set_execution_mode(mode, bufnr)
+	if ok then
+		refresh_indicator(bufnr)
+	end
+	return ok, next_mode
+end
+M.toggle_execution_mode = function(bufnr)
+	bufnr = normalize_bufnr(bufnr)
+	local ok, next_mode = state.toggle_execution_mode(bufnr)
+	if ok then
+		refresh_indicator(bufnr)
+	end
+	return ok, next_mode
+end
 
 M.mark_projected = function(bufnr)
 	return state.mark_projected(bufnr, ensure_projected_buffer_setup)
@@ -176,7 +261,16 @@ end
 M.set_mode = function(enabled, opts)
 	opts = opts or {}
 	opts.ensure_projected_buffer_setup = opts.ensure_projected_buffer_setup or ensure_projected_buffer_setup
-	return buffer.set_mode(enabled, opts)
+	local ok, err = buffer.set_mode(enabled, opts)
+	if ok then
+		if enabled then
+			refresh_indicator(opts.bufnr)
+		else
+			indicator_window.close_buffer(opts.bufnr or 0)
+			util.request_redraw()
+		end
+	end
+	return ok, err
 end
 
 M.normalize_buffer = navigation.normalize_buffer
@@ -185,7 +279,12 @@ M.jump_next_cell = navigation.jump_next_cell
 
 function M.setup(opts)
 	opts = opts or {}
+	if opts.execution ~= nil then
+		opts = vim.deepcopy(opts)
+		opts.execution = normalize_execution_opts(opts.execution)
+	end
 	setup_opts = vim.tbl_deep_extend("force", setup_opts, opts)
+	vim.g.marimo_execution_mode = normalize_execution_opts(setup_opts.execution).mode
 	commands.setup({
 		group = group,
 		api = M,
@@ -193,8 +292,18 @@ function M.setup(opts)
 	})
 	vim.api.nvim_create_autocmd("VimLeavePre", {
 		group = group,
-		callback = function()
-			worker.shutdown_all()
+			callback = function()
+				worker.shutdown_all()
+			end,
+		})
+	vim.api.nvim_create_autocmd({ "BufWinEnter", "WinEnter", "VimResized", "WinResized", "WinClosed" }, {
+		group = group,
+		callback = function(args)
+			local bufnr = args.buf and args.buf ~= 0 and args.buf or vim.api.nvim_get_current_buf()
+			if vim.api.nvim_buf_is_valid(bufnr) and vim.b[bufnr].marimo_projected then
+				refresh_indicator(bufnr)
+			end
+			reconcile_indicators()
 		end,
 	})
 end
