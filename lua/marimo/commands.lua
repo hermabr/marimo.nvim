@@ -76,6 +76,9 @@ function M.setup(opts)
 		api.run_all_cells(0)
 	end, {})
 
+	vim.api.nvim_create_user_command("MarimoRestart", function()
+		api.confirm_restart(0)
+	end, {})
 	vim.api.nvim_create_user_command("MarimoExecution", function(command_opts)
 		local arg = vim.trim(command_opts.args)
 		local mode

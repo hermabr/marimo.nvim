@@ -48,6 +48,8 @@ your normal Neovim config.
 - Adds buffer-local run keymaps for projected marimo buffers:
   `<leader>mr` runs the current cell, `<leader>mR` runs all cells, and
   `<leader>mi` interrupts the active runtime.
+- Adds a buffer-local kernel restart keymap for projected marimo buffers:
+  `<leader>mk` restarts the kernel after a confirmation prompt.
 - Adds buffer-local editing keymaps for projected marimo buffers:
   `<leader>mf` formats the projected layout and `<leader>mm` toggles marimo
   mode for the buffer.
@@ -67,6 +69,7 @@ You can also use:
 - `:MarimoCellNext`
 - `:MarimoRunCell`
 - `:MarimoRunAll`
+- `:MarimoRestart`
 - `:MarimoExecution [eager|lazy]`
 - `:MarimoInterrupt`
 - `:MarimoOutput`
@@ -86,6 +89,7 @@ require("marimo").setup({
     next_cell = "]m",
     run_cell = "<leader>mr",
     run_all_cells = "<leader>mR",
+    restart = "<leader>mk",
     interrupt = "<leader>mi",
     format = "<leader>mf",
     toggle_disabled = "<leader>md",
