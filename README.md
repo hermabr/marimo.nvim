@@ -50,9 +50,10 @@ your normal Neovim config.
   `<leader>mi` interrupts the active runtime.
 - Adds a buffer-local kernel restart keymap for projected marimo buffers:
   `<leader>mk` restarts the kernel after a confirmation prompt.
-- Adds buffer-local editing keymaps for projected marimo buffers:
-  `<leader>mf` formats the projected layout and `<leader>mm` toggles marimo
-  mode for the buffer.
+- Adds a buffer-local mode toggle for Python files:
+  `<leader>mm` toggles marimo mode for the buffer.
+- Adds a buffer-local formatting keymap for projected marimo buffers:
+  `<leader>mf` formats the projected layout.
 - Adds a buffer-local execution toggle:
   `<leader>ml` switches the current buffer between eager and lazy execution.
 - Adds a buffer-local disabled toggle for the current cell:
@@ -97,6 +98,10 @@ require("marimo").setup({
   },
 })
 ```
+
+`mode_toggle` is installed for Python files so you can promote a plain
+`.py` file into a projected marimo buffer. The remaining keymaps are added
+when marimo is active for the current buffer.
 
 `execution.mode` sets the default for new buffers. You can switch the current
 buffer at runtime with `<leader>ml` or `:MarimoExecution`. With no arguments,

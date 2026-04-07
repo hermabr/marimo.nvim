@@ -9,13 +9,21 @@ local M = {}
 function M.setup(opts)
 	local group = opts.group
 	local api = opts.api
+	local keymaps = opts.keymaps or {}
 
-	vim.api.nvim_create_autocmd("BufReadPost", {
+	vim.api.nvim_create_autocmd({ "BufReadPost", "BufNewFile" }, {
 		group = group,
 		pattern = "*.py",
 		callback = function(args)
 			if not state.is_enabled(args.buf) then
 				return
+			end
+			if keymaps.mode_toggle then
+				vim.keymap.set("n", keymaps.mode_toggle, "<Cmd>Marimo<CR>", {
+					buffer = args.buf,
+					silent = true,
+					desc = "Marimo: toggle mode",
+				})
 			end
 			local lines = vim.api.nvim_buf_get_lines(args.buf, 0, -1, false)
 			if markers.looks_like_marimo(lines) then
