@@ -31,6 +31,8 @@ local setup_opts = {
 	},
 }
 
+local ensure_projected_buffer_setup
+
 local function normalize_bufnr(bufnr)
 	if bufnr == nil or bufnr == 0 then
 		return vim.api.nvim_get_current_buf()
@@ -120,18 +122,6 @@ local function ensure_navigation_keymaps(bufnr)
 	end
 
 	local keymaps = setup_opts.keymaps or {}
-	if keymaps.mode_toggle then
-		vim.keymap.set("n", keymaps.mode_toggle, function()
-			local ok, err = M.set_mode(not vim.b[bufnr].marimo_projected, {
-				bufnr = bufnr,
-				manual = true,
-				ensure_projected_buffer_setup = ensure_projected_buffer_setup,
-			})
-			if not ok and err then
-				util.notify(err, vim.log.levels.WARN)
-			end
-		end, { buffer = bufnr, silent = true, desc = "Marimo: toggle mode" })
-	end
 	if keymaps.execution_toggle then
 		vim.keymap.set("n", keymaps.execution_toggle, function()
 			M.toggle_execution_mode(bufnr)
@@ -189,7 +179,7 @@ local function ensure_navigation_keymaps(bufnr)
 	vim.b[bufnr].marimo_navigation_keymaps = true
 end
 
-local function ensure_projected_buffer_setup(bufnr)
+ensure_projected_buffer_setup = function(bufnr)
 	ensure_write_autocmd(bufnr)
 	ensure_sync_autocmd(bufnr)
 	ensure_reconcile_autocmd(bufnr)
@@ -291,6 +281,7 @@ function M.setup(opts)
 	commands.setup({
 		group = group,
 		api = M,
+		keymaps = setup_opts.keymaps,
 		ensure_projected_buffer_setup = ensure_projected_buffer_setup,
 	})
 	vim.api.nvim_create_autocmd("VimLeavePre", {
