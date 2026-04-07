@@ -351,6 +351,54 @@ local function marimo_table_shape_line(total_rows, total_columns)
 	return string.format("shape: (%s, %d)", rows_label, total_columns)
 end
 
+local function table_view_page_index(table_view)
+	local page_index = math.floor(tonumber(table_view and table_view.page_index) or 0)
+	if page_index < 0 then
+		return 0
+	end
+	return page_index
+end
+
+local function table_view_page_size(table_view)
+	local page_size = math.floor(tonumber(table_view and table_view.page_size) or 0)
+	if page_size > 0 then
+		return page_size
+	end
+	local row_count = #(table_view and table_view.rows_data or {})
+	if row_count > 0 then
+		return row_count
+	end
+	return 1
+end
+
+local function table_view_has_rows_above(table_view)
+	return table_view_page_index(table_view) > 0
+end
+
+local function table_view_has_rows_below(table_view)
+	if type(table_view) ~= "table" then
+		return false
+	end
+	local row_count = #(table_view.rows_data or {})
+	if row_count == 0 then
+		return false
+	end
+	local total_rows = table_view.total_rows
+	if type(total_rows) == "number" then
+		local end_row = (table_view_page_index(table_view) * table_view_page_size(table_view)) + row_count
+		return end_row < total_rows
+	end
+	return row_count >= table_view_page_size(table_view)
+end
+
+local function ellipsis_table_row(column_count)
+	local row = {}
+	for _ = 1, column_count do
+		table.insert(row, "...")
+	end
+	return row
+end
+
 local function marimo_table_view_from_html(text)
 	if type(text) ~= "string" or text == "" then
 		return nil
@@ -416,6 +464,9 @@ local function marimo_table_view_to_lines(table_view)
 			table.insert(table_rows, type_row)
 			header_rows = header_rows + 1
 		end
+		if table_view_has_rows_above(table_view) then
+			table.insert(table_rows, ellipsis_table_row(#column_names))
+		end
 		for _, row_data in ipairs(rows_data) do
 			if type(row_data) == "table" then
 				local row = {}
@@ -429,6 +480,9 @@ local function marimo_table_view_to_lines(table_view)
 				end
 				table.insert(table_rows, row)
 			end
+		end
+		if table_view_has_rows_below(table_view) then
+			table.insert(table_rows, ellipsis_table_row(#column_names))
 		end
 	end
 	return render_table_rows(lines, table_rows, {
