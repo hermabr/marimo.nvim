@@ -1,3 +1,7 @@
+if rawget(vim, "_marimo_worker_module") ~= nil then
+	return vim._marimo_worker_module
+end
+
 local source = debug.getinfo(1, "S").source:sub(2)
 local M = {}
 
@@ -315,5 +319,7 @@ end
 M._private = {
 	find_project_root = find_project_root,
 }
+
+vim._marimo_worker_module = M
 
 return M
