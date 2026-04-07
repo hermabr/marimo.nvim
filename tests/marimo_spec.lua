@@ -1101,6 +1101,67 @@ local function test_marimo_output_renders_images_in_float()
 	assert_truthy(snacks_image_calls.closed > closed_before, "expected float image placement to close")
 end
 
+local function test_marimo_output_table_float_supports_paging_and_rows_per_page()
+	local path = make_path("output_float_table.py")
+	write_file(
+		path,
+		[[# + {marimo}
+
+import marimo as mo
+rows = [{"value": i} for i in range(1, 151)]
+mo.ui.table(rows, pagination=True, page_size=10)
+]]
+	)
+	edit(path)
+
+	vim.cmd("Marimo on")
+	vim.cmd("MarimoRunAll")
+	wait_for_match(" value")
+	wait_for_match(" 10")
+	wait_for_truthy(function()
+		local lines = table.concat(rendered_lines(), "\n")
+		return not lines:match("marimo queued") and not lines:match("marimo running")
+	end, "timed out waiting for table output to settle")
+
+	vim.api.nvim_win_set_cursor(0, { 5, 0 })
+	vim.cmd("MarimoOutput")
+	local float_win = find_output_floating_window()
+	assert_truthy(float_win ~= nil, "expected output float for table paging test")
+	vim.api.nvim_set_current_win(float_win)
+
+	local float_bufnr = vim.api.nvim_win_get_buf(float_win)
+	wait_for_truthy(function()
+		local lines = vim.api.nvim_buf_get_lines(float_bufnr, 0, -1, false)
+		return table.concat(lines, "\n"):match("rows 1%-25 of 150") ~= nil
+	end, "timed out waiting for expanded table header")
+	local lines = vim.api.nvim_buf_get_lines(float_bufnr, 0, -1, false)
+	assert_matches(table.concat(lines, "\n"), "rows 1%-25 of 150")
+	assert_matches(table.concat(lines, "\n"), "page size 25")
+	assert_truthy(vim.tbl_contains(lines, "25"), "expected float table to expand to 25 rows")
+
+	local next_map = vim.fn.maparg("]", "n", false, true)
+	assert_truthy(type(next_map.callback) == "function", "expected next table page callback")
+	next_map.callback()
+
+	lines = vim.api.nvim_buf_get_lines(float_bufnr, 0, -1, false)
+	assert_matches(table.concat(lines, "\n"), "rows 26%-50 of 150")
+	assert_truthy(vim.tbl_contains(lines, "50"), "expected second table page to include row 50")
+
+	local resize_map = vim.fn.maparg("=", "n", false, true)
+	assert_truthy(type(resize_map.callback) == "function", "expected rows per page callback")
+	local original_input = vim.fn.input
+	vim.fn.input = function()
+		return "50"
+	end
+	resize_map.callback()
+	vim.fn.input = original_input
+
+	lines = vim.api.nvim_buf_get_lines(float_bufnr, 0, -1, false)
+	assert_matches(table.concat(lines, "\n"), "rows 1%-50 of 150")
+	assert_matches(table.concat(lines, "\n"), "page size 50")
+	assert_truthy(vim.tbl_contains(lines, "50"), "expected rows per page to update table contents")
+end
+
 local function test_jump_next_cell_appends_new_cell_and_enters_insert_mode()
 	local path = make_path("navigation_append.py")
 	write_file(path, "# + {marimo}\n\nx = 1\n")
@@ -2153,6 +2214,7 @@ local tests = {
 	test_marimo_output_title_updates_current_runtime_while_running,
 	test_marimo_output_preserves_relative_numbers_and_wraps_lines,
 	test_marimo_output_renders_images_in_float,
+	test_marimo_output_table_float_supports_paging_and_rows_per_page,
 	test_jump_next_cell_appends_new_cell_and_enters_insert_mode,
 	test_render_partial_updates_preserve_unrelated_extmarks,
 	test_completed_run_clears_pending_runtime_without_idle_status,
