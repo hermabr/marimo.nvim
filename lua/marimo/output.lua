@@ -1,5 +1,7 @@
 local M = {}
-local rich_output = dofile(vim.fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":h") .. "/rich_output.lua")
+local dir = vim.fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":h")
+local rich_output = dofile(dir .. "/rich_output.lua")
+local util = dofile(dir .. "/util.lua")
 local INTERNAL_ROW_ID_COLUMN = "_marimo_row_id"
 
 local function as_string(value)
@@ -17,8 +19,8 @@ local function limit_lines(lines, opts)
 
 	for _, line in ipairs(lines or {}) do
 		local current = tostring(line)
-		if type(max_line_chars) == "number" and max_line_chars > 3 and #current > max_line_chars then
-			current = current:sub(1, max_line_chars - 3) .. "..."
+		if type(max_line_chars) == "number" and max_line_chars > 0 and vim.fn.strdisplaywidth(current) > max_line_chars then
+			current = util.truncate_display_text(current, max_line_chars, "...")
 			truncated = true
 		end
 		table.insert(limited, current)

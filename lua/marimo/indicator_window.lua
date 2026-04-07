@@ -1,4 +1,5 @@
 local M = {}
+local util = dofile(vim.fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":h") .. "/util.lua")
 
 local window_state = {}
 
@@ -25,30 +26,7 @@ local function close_entry(source_winid)
 end
 
 local function truncate_label(label, max_width)
-	if type(label) ~= "string" then
-		return ""
-	end
-	if max_width <= 0 then
-		return ""
-	end
-	if vim.fn.strdisplaywidth(label) <= max_width then
-		return label
-	end
-	if max_width <= 3 then
-		return label:sub(1, max_width)
-	end
-	local out = {}
-	local width = 0
-	for _, char in ipairs(vim.fn.split(label, [[\zs]])) do
-		local char_width = vim.fn.strdisplaywidth(char)
-		if width + char_width > max_width - 3 then
-			break
-		end
-		table.insert(out, char)
-		width = width + char_width
-	end
-	table.insert(out, "...")
-	return table.concat(out, "")
+	return util.truncate_display_text(label, max_width, "...")
 end
 
 local function configure_buffer(bufnr)
