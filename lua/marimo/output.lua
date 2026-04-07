@@ -115,10 +115,15 @@ local function fragment_to_lines(fragment)
 	return lines
 end
 
-local function table_to_lines(table_html)
-	if type(table_html) ~= "string" or table_html == "" then
-		return {}
+local function append_lines(target, lines)
+	for _, line in ipairs(lines or {}) do
+		if type(line) == "string" and line ~= "" then
+			table.insert(target, line)
+		end
 	end
+end
+
+local function parse_table_rows(table_html)
 	local rows = {}
 	for row_html in table_html:gmatch("<[Tt][Rr][^>]*>(.-)</[Tt][Rr]>") do
 		local row = {}
@@ -131,26 +136,74 @@ local function table_to_lines(table_html)
 			table.insert(rows, row)
 		end
 	end
-	if #rows == 0 then
-		return {}
-	end
+	return rows
+end
+
+local function table_column_widths(rows)
 	local widths = {}
 	for _, row in ipairs(rows) do
 		for idx, cell in ipairs(row) do
 			widths[idx] = math.max(widths[idx] or 0, vim.fn.strdisplaywidth(cell))
 		end
 	end
-	local lines = {}
-	for _, row in ipairs(rows) do
-		local padded = {}
-		for idx, width in ipairs(widths) do
-			local cell = row[idx] or ""
-			local padding = math.max(width - vim.fn.strdisplaywidth(cell), 0)
-			table.insert(padded, cell .. string.rep(" ", padding))
+	return widths
+end
+
+local function table_border_line(widths, left, middle, right, fill)
+	local cells = {}
+	for _, width in ipairs(widths) do
+		table.insert(cells, string.rep(fill, width + 2))
+	end
+	return left .. table.concat(cells, middle) .. right
+end
+
+local function table_content_line(row, widths)
+	local padded = {}
+	for idx, width in ipairs(widths) do
+		local cell = row[idx] or ""
+		local padding = math.max(width - vim.fn.strdisplaywidth(cell), 0)
+		table.insert(padded, " " .. cell .. string.rep(" ", padding) .. " ")
+	end
+	return "│" .. table.concat(padded, "┆") .. "│"
+end
+
+local function render_table_rows(lines, rows, opts)
+	if #rows == 0 then
+		return lines
+	end
+	local widths = table_column_widths(rows)
+	local header_rows = math.max(math.floor(tonumber(opts and opts.header_rows) or 0), 0)
+	header_rows = math.min(header_rows, #rows)
+	table.insert(lines, table_border_line(widths, "┌", "┬", "┐", "─"))
+	for idx, row in ipairs(rows) do
+		table.insert(lines, table_content_line(row, widths))
+		if header_rows > 0 and idx == header_rows then
+			table.insert(lines, table_border_line(widths, "╞", "╪", "╡", "═"))
 		end
-		table.insert(lines, (table.concat(padded, " | "):gsub("%s+$", "")))
+	end
+	table.insert(lines, table_border_line(widths, "└", "┴", "┘", "─"))
+	if opts and opts.show_empty_hint and #rows <= header_rows then
+		table.insert(lines, "[empty table]")
 	end
 	return lines
+end
+
+local function table_to_lines(table_html)
+	if type(table_html) ~= "string" or table_html == "" then
+		return {}
+	end
+	local header_rows = 0
+	for thead_html in table_html:gmatch("<[Tt][Hh][Ee][Aa][Dd][^>]*>(.-)</[Tt][Hh][Ee][Aa][Dd]>") do
+		header_rows = header_rows + #parse_table_rows(thead_html)
+	end
+	local rows = parse_table_rows(table_html)
+	if header_rows == 0 then
+		local first_row_html = table_html:match("<[Tt][Rr][^>]*>(.-)</[Tt][Rr]>")
+		if type(first_row_html) == "string" and first_row_html:match("<[Tt][Hh][^>]*>") then
+			header_rows = 1
+		end
+	end
+	return render_table_rows({}, rows, { header_rows = header_rows })
 end
 
 local function extract_tag_attribute(tag_html, attribute)
@@ -290,37 +343,60 @@ local function column_names_and_types(field_types, rows_data)
 	return column_names, type_names
 end
 
-local function render_table_rows(lines, rows, opts)
-	if #rows == 0 then
-		return lines
-	end
-	local widths = {}
-	for _, row in ipairs(rows) do
-		for idx, cell in ipairs(row) do
-			widths[idx] = math.max(widths[idx] or 0, vim.fn.strdisplaywidth(cell))
-		end
-	end
-	for _, row in ipairs(rows) do
-		local padded = {}
-		for idx, width in ipairs(widths) do
-			local cell = row[idx] or ""
-			local padding = math.max(width - vim.fn.strdisplaywidth(cell), 0)
-			table.insert(padded, cell .. string.rep(" ", padding))
-		end
-		table.insert(lines, (table.concat(padded, " | "):gsub("%s+$", "")))
-	end
-	if opts and opts.show_empty_hint and #rows <= 1 then
-		table.insert(lines, "[empty table]")
-	end
-	return lines
-end
-
 local function marimo_table_shape_line(total_rows, total_columns)
 	if type(total_columns) ~= "number" or total_columns <= 0 then
 		return nil
 	end
 	local rows_label = type(total_rows) == "number" and tostring(total_rows) or "?"
 	return string.format("shape: (%s, %d)", rows_label, total_columns)
+end
+
+local function table_view_page_index(table_view)
+	local page_index = math.floor(tonumber(table_view and table_view.page_index) or 0)
+	if page_index < 0 then
+		return 0
+	end
+	return page_index
+end
+
+local function table_view_page_size(table_view)
+	local page_size = math.floor(tonumber(table_view and table_view.page_size) or 0)
+	if page_size > 0 then
+		return page_size
+	end
+	local row_count = #(table_view and table_view.rows_data or {})
+	if row_count > 0 then
+		return row_count
+	end
+	return 1
+end
+
+local function table_view_has_rows_above(table_view)
+	return table_view_page_index(table_view) > 0
+end
+
+local function table_view_has_rows_below(table_view)
+	if type(table_view) ~= "table" then
+		return false
+	end
+	local row_count = #(table_view.rows_data or {})
+	if row_count == 0 then
+		return false
+	end
+	local total_rows = table_view.total_rows
+	if type(total_rows) == "number" then
+		local end_row = (table_view_page_index(table_view) * table_view_page_size(table_view)) + row_count
+		return end_row < total_rows
+	end
+	return row_count >= table_view_page_size(table_view)
+end
+
+local function ellipsis_table_row(column_count)
+	local row = {}
+	for _ = 1, column_count do
+		table.insert(row, "...")
+	end
+	return row
 end
 
 local function marimo_table_view_from_html(text)
@@ -369,8 +445,10 @@ local function marimo_table_view_to_lines(table_view)
 	local column_names = table_view.column_names or {}
 	local type_names = table_view.type_names or {}
 	local rows_data = table_view.rows_data or {}
+	local header_rows = 0
 	if #column_names > 0 then
 		table.insert(table_rows, column_names)
+		header_rows = header_rows + 1
 		local has_type_name = false
 		for _, type_name in ipairs(type_names) do
 			if type_name ~= "" then
@@ -384,6 +462,10 @@ local function marimo_table_view_to_lines(table_view)
 				table.insert(type_row, tostring(type_names[idx] or ""))
 			end
 			table.insert(table_rows, type_row)
+			header_rows = header_rows + 1
+		end
+		if table_view_has_rows_above(table_view) then
+			table.insert(table_rows, ellipsis_table_row(#column_names))
 		end
 		for _, row_data in ipairs(rows_data) do
 			if type(row_data) == "table" then
@@ -399,8 +481,14 @@ local function marimo_table_view_to_lines(table_view)
 				table.insert(table_rows, row)
 			end
 		end
+		if table_view_has_rows_below(table_view) then
+			table.insert(table_rows, ellipsis_table_row(#column_names))
+		end
 	end
-	return render_table_rows(lines, table_rows)
+	return render_table_rows(lines, table_rows, {
+		header_rows = header_rows,
+		show_empty_hint = true,
+	})
 end
 
 local function marimo_table_to_lines(text)
@@ -409,14 +497,6 @@ local function marimo_table_to_lines(text)
 		return {}
 	end
 	return marimo_table_view_to_lines(table_view)
-end
-
-local function append_lines(target, lines)
-	for _, line in ipairs(lines or {}) do
-		if type(line) == "string" and line ~= "" then
-			table.insert(target, line)
-		end
-	end
 end
 
 local function html_to_lines(text)
