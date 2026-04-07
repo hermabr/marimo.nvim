@@ -425,6 +425,35 @@ local function test_marshaled_json_outputs_render_text_and_images()
 	assert_truthy(not lines:match("application/vnd%.marimo%+mimebundle"), "expected mimebundle sentinel to stay hidden")
 end
 
+local function test_marshaled_json_float_outputs_render_without_plaintext_sentinels()
+	local render = dofile(vim.fn.getcwd() .. "/lua/marimo/render.lua")
+	local path = make_path("marshaled_json_float_output.py")
+	write_file(path, "# + {marimo}\n\nx = 1")
+	edit(path)
+
+	render.render(0, {
+		{
+			id = "cell-1",
+			projection_range = { start_line = 1, end_line = 3 },
+			runtime = {
+				output = {
+					mimetype = "application/json",
+					data = vim.json.encode({
+						"text/plain+float:0.0",
+						"text/plain+float:1.0",
+						"text/plain+float:2.5",
+					}),
+				},
+				console = {},
+			},
+		},
+	})
+
+	local lines = table.concat(rendered_lines(), "\n")
+	assert_matches(lines, "%[0%.0,1%.0,2%.5%]")
+	assert_truthy(not lines:match("text/plain%+float"), "expected float sentinel to stay hidden")
+end
+
 local function test_deactivation_clears_runtime_image_placements()
 	local path = make_path("runtime_image_cleanup.py")
 	reset_snacks_image_calls()
@@ -451,6 +480,7 @@ local function test_failed_deactivation_keeps_worker_session_alive()
 
 	vim.cmd("Marimo")
 	assert_truthy(vim.b.marimo_projected)
+	assert_eq(vim.b.marimo_mode, true)
 	local session_id = vim.b.marimo_session_id
 
 	vim.api.nvim_buf_set_lines(0, -1, -1, false, { "", "extra = 1" })
@@ -459,6 +489,7 @@ local function test_failed_deactivation_keeps_worker_session_alive()
 	vim.cmd("Marimo")
 	assert_truthy(vim.b.marimo_projected)
 	assert_eq(vim.b.marimo_session_id, session_id)
+	assert_eq(vim.b.marimo_mode, true)
 
 	vim.cmd("write")
 	wait_for_truthy(function()
@@ -476,6 +507,7 @@ local function test_manual_activation_rejects_unnamed_buffers()
 	vim.cmd("Marimo")
 	assert_truthy(not vim.b.marimo_projected)
 	assert_eq(vim.b.marimo_session_id, nil)
+	assert_eq(vim.b.marimo_mode, nil)
 end
 
 local function test_manual_activation_preserves_dirty_state()
@@ -1108,6 +1140,75 @@ local function test_marimo_output_renders_images_in_float()
 	local closed_before = snacks_image_calls.closed
 	vim.cmd("q")
 	assert_truthy(snacks_image_calls.closed > closed_before, "expected float image placement to close")
+end
+
+local function test_marimo_output_table_float_supports_paging_and_rows_per_page()
+	local path = make_path("output_float_table.py")
+	write_file(
+		path,
+		[[# + {marimo}
+
+import marimo as mo
+rows = [{"value": i} for i in range(1, 151)]
+mo.ui.table(rows, pagination=True, page_size=10)
+]]
+	)
+	edit(path)
+
+	vim.cmd("Marimo on")
+	vim.cmd("MarimoRunAll")
+	wait_for_match("│ value │")
+	wait_for_match("│ 1%s+│")
+	wait_for_truthy(function()
+		local lines = table.concat(rendered_lines(), "\n")
+		return not lines:match("marimo queued") and not lines:match("marimo running")
+	end, "timed out waiting for table output to settle")
+
+	vim.api.nvim_win_set_cursor(0, { 5, 0 })
+	vim.cmd("MarimoOutput")
+	local float_win = find_output_floating_window()
+	assert_truthy(float_win ~= nil, "expected output float for table paging test")
+	vim.api.nvim_set_current_win(float_win)
+
+	local float_bufnr = vim.api.nvim_win_get_buf(float_win)
+	wait_for_truthy(function()
+		local lines = vim.api.nvim_buf_get_lines(float_bufnr, 0, -1, false)
+		return table.concat(lines, "\n"):match("rows 1%-25 of 150") ~= nil
+	end, "timed out waiting for expanded table header")
+	local lines = vim.api.nvim_buf_get_lines(float_bufnr, 0, -1, false)
+	local text = table.concat(lines, "\n")
+	assert_matches(text, "rows 1%-25 of 150")
+	assert_matches(text, "page size 25")
+	assert_matches(text, "│ value │")
+	assert_matches(text, "╞")
+	assert_matches(text, "│ 25%s+│")
+	assert_eq(select(2, text:gsub("│ %.%.%.%s*│", "")), 1, "expected first page to show a bottom ellipsis row")
+
+	local next_map = vim.fn.maparg("]", "n", false, true)
+	assert_truthy(type(next_map.callback) == "function", "expected next table page callback")
+	next_map.callback()
+
+	lines = vim.api.nvim_buf_get_lines(float_bufnr, 0, -1, false)
+	text = table.concat(lines, "\n")
+	assert_matches(text, "rows 26%-50 of 150")
+	assert_matches(text, "│ 50%s+│")
+	assert_eq(select(2, text:gsub("│ %.%.%.%s*│", "")), 2, "expected middle page to show top and bottom ellipsis rows")
+
+	local resize_map = vim.fn.maparg("=", "n", false, true)
+	assert_truthy(type(resize_map.callback) == "function", "expected rows per page callback")
+	local original_input = vim.fn.input
+	vim.fn.input = function()
+		return "50"
+	end
+	resize_map.callback()
+	vim.fn.input = original_input
+
+	lines = vim.api.nvim_buf_get_lines(float_bufnr, 0, -1, false)
+	text = table.concat(lines, "\n")
+	assert_matches(text, "rows 1%-50 of 150")
+	assert_matches(text, "page size 50")
+	assert_matches(text, "│ 50%s+│")
+	assert_eq(select(2, text:gsub("│ %.%.%.%s*│", "")), 1, "expected resized first page to show a bottom ellipsis row")
 end
 
 local function test_jump_next_cell_appends_new_cell_and_enters_insert_mode()
@@ -1798,9 +1899,10 @@ Thing()
 
 	local lines = table.concat(rendered_lines(), "\n")
 	assert_matches(lines, " shape: %(7, 1%)")
-	assert_matches(lines, " number")
-	assert_matches(lines, " i64")
-	assert_matches(lines, " 7")
+	assert_matches(lines, "│ number │")
+	assert_matches(lines, "│ i64%s+│")
+	assert_matches(lines, "│ 7%s+│")
+	assert_matches(lines, "╞")
 	assert_truthy(not lines:match("%.dataframe"), "expected table styles to be removed")
 	assert_truthy(not lines:match("%[html output%]"), "expected html table summary instead of placeholder")
 end
@@ -1879,9 +1981,10 @@ local function test_runtime_marimo_table_html_is_summarized_as_text()
 
 	local lines = table.concat(rendered_lines(), "\n")
 	assert_matches(lines, " shape: %(7, 1%)")
-	assert_matches(lines, " number")
-	assert_matches(lines, " i64")
-	assert_matches(lines, " 7")
+	assert_matches(lines, "│ number │")
+	assert_matches(lines, "│ i64%s+│")
+	assert_matches(lines, "│ 7%s+│")
+	assert_matches(lines, "╞")
 	assert_truthy(not lines:match("%[html output%]"), "expected marimo table summary instead of placeholder")
 	assert_truthy(not lines:match("marimo%-table"), "expected custom element markup to be stripped")
 end
@@ -2162,6 +2265,7 @@ local tests = {
 	test_marimo_output_title_updates_current_runtime_while_running,
 	test_marimo_output_preserves_relative_numbers_and_wraps_lines,
 	test_marimo_output_renders_images_in_float,
+	test_marimo_output_table_float_supports_paging_and_rows_per_page,
 	test_jump_next_cell_appends_new_cell_and_enters_insert_mode,
 	test_render_partial_updates_preserve_unrelated_extmarks,
 	test_completed_run_clears_pending_runtime_without_idle_status,
@@ -2170,6 +2274,7 @@ local tests = {
 	test_stringified_image_bundle_outputs_use_snacks_image,
 	test_console_mimebundle_outputs_render_as_images,
 	test_marshaled_json_outputs_render_text_and_images,
+	test_marshaled_json_float_outputs_render_without_plaintext_sentinels,
 	test_write_does_not_block_while_runtime_is_running,
 	test_editing_running_cell_and_autosync_do_not_block,
 	test_edits_interrupt_run_all_before_lower_cells_finish,

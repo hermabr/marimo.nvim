@@ -1,5 +1,6 @@
 local M = {}
 local rich_output = dofile(vim.fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":h") .. "/rich_output.lua")
+local INTERNAL_ROW_ID_COLUMN = "_marimo_row_id"
 
 local function as_string(value)
 	if type(value) == "string" then
@@ -114,10 +115,15 @@ local function fragment_to_lines(fragment)
 	return lines
 end
 
-local function table_to_lines(table_html)
-	if type(table_html) ~= "string" or table_html == "" then
-		return {}
+local function append_lines(target, lines)
+	for _, line in ipairs(lines or {}) do
+		if type(line) == "string" and line ~= "" then
+			table.insert(target, line)
+		end
 	end
+end
+
+local function parse_table_rows(table_html)
 	local rows = {}
 	for row_html in table_html:gmatch("<[Tt][Rr][^>]*>(.-)</[Tt][Rr]>") do
 		local row = {}
@@ -130,26 +136,74 @@ local function table_to_lines(table_html)
 			table.insert(rows, row)
 		end
 	end
-	if #rows == 0 then
-		return {}
-	end
+	return rows
+end
+
+local function table_column_widths(rows)
 	local widths = {}
 	for _, row in ipairs(rows) do
 		for idx, cell in ipairs(row) do
 			widths[idx] = math.max(widths[idx] or 0, vim.fn.strdisplaywidth(cell))
 		end
 	end
-	local lines = {}
-	for _, row in ipairs(rows) do
-		local padded = {}
-		for idx, width in ipairs(widths) do
-			local cell = row[idx] or ""
-			local padding = math.max(width - vim.fn.strdisplaywidth(cell), 0)
-			table.insert(padded, cell .. string.rep(" ", padding))
+	return widths
+end
+
+local function table_border_line(widths, left, middle, right, fill)
+	local cells = {}
+	for _, width in ipairs(widths) do
+		table.insert(cells, string.rep(fill, width + 2))
+	end
+	return left .. table.concat(cells, middle) .. right
+end
+
+local function table_content_line(row, widths)
+	local padded = {}
+	for idx, width in ipairs(widths) do
+		local cell = row[idx] or ""
+		local padding = math.max(width - vim.fn.strdisplaywidth(cell), 0)
+		table.insert(padded, " " .. cell .. string.rep(" ", padding) .. " ")
+	end
+	return "│" .. table.concat(padded, "┆") .. "│"
+end
+
+local function render_table_rows(lines, rows, opts)
+	if #rows == 0 then
+		return lines
+	end
+	local widths = table_column_widths(rows)
+	local header_rows = math.max(math.floor(tonumber(opts and opts.header_rows) or 0), 0)
+	header_rows = math.min(header_rows, #rows)
+	table.insert(lines, table_border_line(widths, "┌", "┬", "┐", "─"))
+	for idx, row in ipairs(rows) do
+		table.insert(lines, table_content_line(row, widths))
+		if header_rows > 0 and idx == header_rows then
+			table.insert(lines, table_border_line(widths, "╞", "╪", "╡", "═"))
 		end
-		table.insert(lines, (table.concat(padded, " | "):gsub("%s+$", "")))
+	end
+	table.insert(lines, table_border_line(widths, "└", "┴", "┘", "─"))
+	if opts and opts.show_empty_hint and #rows <= header_rows then
+		table.insert(lines, "[empty table]")
 	end
 	return lines
+end
+
+local function table_to_lines(table_html)
+	if type(table_html) ~= "string" or table_html == "" then
+		return {}
+	end
+	local header_rows = 0
+	for thead_html in table_html:gmatch("<[Tt][Hh][Ee][Aa][Dd][^>]*>(.-)</[Tt][Hh][Ee][Aa][Dd]>") do
+		header_rows = header_rows + #parse_table_rows(thead_html)
+	end
+	local rows = parse_table_rows(table_html)
+	if header_rows == 0 then
+		local first_row_html = table_html:match("<[Tt][Rr][^>]*>(.-)</[Tt][Rr]>")
+		if type(first_row_html) == "string" and first_row_html:match("<[Tt][Hh][^>]*>") then
+			header_rows = 1
+		end
+	end
+	return render_table_rows({}, rows, { header_rows = header_rows })
 end
 
 local function extract_tag_attribute(tag_html, attribute)
@@ -188,28 +242,82 @@ local function decode_json_attribute(value)
 	return parsed
 end
 
-local function marimo_table_to_lines(text)
-	if type(text) ~= "string" or text == "" then
-		return {}
+local function normalize_rows_data(value)
+	if type(value) == "table" then
+		return value
 	end
-	local tag_html = text:match("<[Mm][Aa][Rr][Ii][Mm][Oo]%-[Tt][Aa][Bb][Ll][Ee][^>]*>")
-	if tag_html == nil then
-		return {}
+	if type(value) ~= "string" or value == "" or vim.json == nil then
+		return nil
 	end
-	local rows_data = decode_json_attribute(extract_tag_attribute(tag_html, "data%-data"))
-	if type(rows_data) ~= "table" then
-		return {}
+	local ok, parsed = pcall(vim.json.decode, value)
+	if not ok or type(parsed) ~= "table" then
+		return nil
 	end
-	local field_types = decode_json_attribute(extract_tag_attribute(tag_html, "data%-field%-types"))
-	local total_rows = tonumber(decode_html_entities(extract_tag_attribute(tag_html, "data%-total%-rows") or "")) or #rows_data
-	local total_columns = tonumber(decode_html_entities(extract_tag_attribute(tag_html, "data%-total%-columns") or ""))
+	return parsed
+end
+
+local function decode_total_rows_value(value, fallback)
+	if type(value) == "number" then
+		return value
+	end
+	if type(value) == "string" then
+		local decoded = decode_json_attribute(value)
+		if type(decoded) == "number" then
+			return decoded
+		end
+		if decoded == "too_many" then
+			return decoded
+		end
+		local numeric = tonumber(decode_html_entities(value))
+		if numeric ~= nil then
+			return numeric
+		end
+	end
+	return fallback
+end
+
+local function decode_total_columns_value(value, fallback)
+	if type(value) == "number" then
+		return value
+	end
+	if type(value) == "string" then
+		local decoded = decode_json_attribute(value)
+		if type(decoded) == "number" then
+			return decoded
+		end
+		local numeric = tonumber(decode_html_entities(value))
+		if numeric ~= nil then
+			return numeric
+		end
+	end
+	return fallback
+end
+
+local function decode_page_size_value(value, fallback)
+	if type(value) == "number" then
+		return value
+	end
+	if type(value) == "string" then
+		local decoded = decode_json_attribute(value)
+		if type(decoded) == "number" then
+			return decoded
+		end
+		local numeric = tonumber(decode_html_entities(value))
+		if numeric ~= nil then
+			return numeric
+		end
+	end
+	return fallback
+end
+
+local function column_names_and_types(field_types, rows_data)
 	local column_names = {}
 	local type_names = {}
 	if type(field_types) == "table" then
 		for _, entry in ipairs(field_types) do
 			if type(entry) == "table" then
 				local column_name = entry[1]
-				if type(column_name) == "string" and column_name ~= "" then
+				if type(column_name) == "string" and column_name ~= "" and column_name ~= INTERNAL_ROW_ID_COLUMN then
 					table.insert(column_names, column_name)
 					local field_type = entry[2]
 					if type(field_type) == "table" then
@@ -225,21 +333,122 @@ local function marimo_table_to_lines(text)
 		local first_row = rows_data[1]
 		if type(first_row) == "table" then
 			for key, _ in pairs(first_row) do
-				table.insert(column_names, tostring(key))
+				if key ~= INTERNAL_ROW_ID_COLUMN then
+					table.insert(column_names, tostring(key))
+				end
 			end
 			table.sort(column_names)
 		end
 	end
-	if total_columns == nil then
-		total_columns = #column_names
+	return column_names, type_names
+end
+
+local function marimo_table_shape_line(total_rows, total_columns)
+	if type(total_columns) ~= "number" or total_columns <= 0 then
+		return nil
+	end
+	local rows_label = type(total_rows) == "number" and tostring(total_rows) or "?"
+	return string.format("shape: (%s, %d)", rows_label, total_columns)
+end
+
+local function table_view_page_index(table_view)
+	local page_index = math.floor(tonumber(table_view and table_view.page_index) or 0)
+	if page_index < 0 then
+		return 0
+	end
+	return page_index
+end
+
+local function table_view_page_size(table_view)
+	local page_size = math.floor(tonumber(table_view and table_view.page_size) or 0)
+	if page_size > 0 then
+		return page_size
+	end
+	local row_count = #(table_view and table_view.rows_data or {})
+	if row_count > 0 then
+		return row_count
+	end
+	return 1
+end
+
+local function table_view_has_rows_above(table_view)
+	return table_view_page_index(table_view) > 0
+end
+
+local function table_view_has_rows_below(table_view)
+	if type(table_view) ~= "table" then
+		return false
+	end
+	local row_count = #(table_view.rows_data or {})
+	if row_count == 0 then
+		return false
+	end
+	local total_rows = table_view.total_rows
+	if type(total_rows) == "number" then
+		local end_row = (table_view_page_index(table_view) * table_view_page_size(table_view)) + row_count
+		return end_row < total_rows
+	end
+	return row_count >= table_view_page_size(table_view)
+end
+
+local function ellipsis_table_row(column_count)
+	local row = {}
+	for _ = 1, column_count do
+		table.insert(row, "...")
+	end
+	return row
+end
+
+local function marimo_table_view_from_html(text)
+	if type(text) ~= "string" or text == "" then
+		return nil
+	end
+	local wrapper_html = text:match("<[Mm][Aa][Rr][Ii][Mm][Oo]%-[Uu][Ii]%-[Ee][Ll][Ee][Mm][Ee][Nn][Tt][^>]*>")
+	local tag_html = text:match("<[Mm][Aa][Rr][Ii][Mm][Oo]%-[Tt][Aa][Bb][Ll][Ee][^>]*>")
+	if tag_html == nil then
+		return nil
+	end
+	local rows_data = normalize_rows_data(decode_json_attribute(extract_tag_attribute(tag_html, "data%-data")))
+	if type(rows_data) ~= "table" then
+		return nil
+	end
+	local field_types = decode_json_attribute(extract_tag_attribute(tag_html, "data%-field%-types"))
+	local column_names, type_names = column_names_and_types(field_types, rows_data)
+	local total_rows = decode_total_rows_value(extract_tag_attribute(tag_html, "data%-total%-rows"), #rows_data)
+	local total_columns = decode_total_columns_value(extract_tag_attribute(tag_html, "data%-total%-columns"), #column_names)
+	local page_size = decode_page_size_value(extract_tag_attribute(tag_html, "data%-page%-size"), #rows_data)
+	local pagination = decode_json_attribute(extract_tag_attribute(tag_html, "data%-pagination")) == true
+	local namespace = wrapper_html and extract_tag_attribute(wrapper_html, "object%-id") or nil
+	return {
+		namespace = namespace,
+		pagination = pagination,
+		page_index = 0,
+		page_size = page_size,
+		total_rows = total_rows,
+		total_columns = total_columns,
+		column_names = column_names,
+		type_names = type_names,
+		rows_data = rows_data,
+	}
+end
+
+local function marimo_table_view_to_lines(table_view)
+	if type(table_view) ~= "table" then
+		return {}
 	end
 	local lines = {}
-	if total_rows > 0 and total_columns > 0 then
-		table.insert(lines, string.format("shape: (%d, %d)", total_rows, total_columns))
+	local shape_line = marimo_table_shape_line(table_view.total_rows, table_view.total_columns)
+	if shape_line then
+		table.insert(lines, shape_line)
 	end
 	local table_rows = {}
+	local column_names = table_view.column_names or {}
+	local type_names = table_view.type_names or {}
+	local rows_data = table_view.rows_data or {}
+	local header_rows = 0
 	if #column_names > 0 then
 		table.insert(table_rows, column_names)
+		header_rows = header_rows + 1
 		local has_type_name = false
 		for _, type_name in ipairs(type_names) do
 			if type_name ~= "" then
@@ -253,6 +462,10 @@ local function marimo_table_to_lines(text)
 				table.insert(type_row, tostring(type_names[idx] or ""))
 			end
 			table.insert(table_rows, type_row)
+			header_rows = header_rows + 1
+		end
+		if table_view_has_rows_above(table_view) then
+			table.insert(table_rows, ellipsis_table_row(#column_names))
 		end
 		for _, row_data in ipairs(rows_data) do
 			if type(row_data) == "table" then
@@ -268,31 +481,22 @@ local function marimo_table_to_lines(text)
 				table.insert(table_rows, row)
 			end
 		end
-	end
-	local widths = {}
-	for _, row in ipairs(table_rows) do
-		for idx, cell in ipairs(row) do
-			widths[idx] = math.max(widths[idx] or 0, vim.fn.strdisplaywidth(cell))
+		if table_view_has_rows_below(table_view) then
+			table.insert(table_rows, ellipsis_table_row(#column_names))
 		end
 	end
-	for _, row in ipairs(table_rows) do
-		local padded = {}
-		for idx, width in ipairs(widths) do
-			local cell = row[idx] or ""
-			local padding = math.max(width - vim.fn.strdisplaywidth(cell), 0)
-			table.insert(padded, cell .. string.rep(" ", padding))
-		end
-		table.insert(lines, (table.concat(padded, " | "):gsub("%s+$", "")))
-	end
-	return lines
+	return render_table_rows(lines, table_rows, {
+		header_rows = header_rows,
+		show_empty_hint = true,
+	})
 end
 
-local function append_lines(target, lines)
-	for _, line in ipairs(lines or {}) do
-		if type(line) == "string" and line ~= "" then
-			table.insert(target, line)
-		end
+local function marimo_table_to_lines(text)
+	local table_view = marimo_table_view_from_html(text)
+	if type(table_view) ~= "table" then
+		return {}
 	end
+	return marimo_table_view_to_lines(table_view)
 end
 
 local function html_to_lines(text)
@@ -433,7 +637,7 @@ local function render_marshaled_json_output(data, opts)
 	if sanitized == rich_output.REMOVE then
 		return {}, nil
 	end
-	local ok, encoded = pcall(vim.json.encode, sanitized)
+	local ok, encoded = pcall(rich_output.stringify_marshaled_value, sanitized)
 	if not ok or type(encoded) ~= "string" then
 		return nil
 	end
@@ -617,6 +821,48 @@ function M.runtime_lines(runtime, opts)
 	end
 
 	return lines
+end
+
+function M.extract_table_view(output)
+	if type(output) ~= "table" then
+		return nil
+	end
+	local mimetype = as_string(output.mimetype) or ""
+	local data = output.data
+	if mimetype == "text/html" and type(data) == "string" then
+		return marimo_table_view_from_html(data)
+	end
+	if mimetype == "application/vnd.marimo+mimebundle" and type(data) == "table" and type(data["text/html"]) == "string" then
+		return marimo_table_view_from_html(data["text/html"])
+	end
+	local decoded_bundle = rich_output.decode_stringified_bundle(data)
+	if type(decoded_bundle) == "table" and type(decoded_bundle["text/html"]) == "string" then
+		return marimo_table_view_from_html(decoded_bundle["text/html"])
+	end
+	return nil
+end
+
+function M.apply_table_search_result(table_view, result, page_index, page_size)
+	if type(table_view) ~= "table" or type(result) ~= "table" then
+		return nil
+	end
+	local rows_data = normalize_rows_data(result.data)
+	if type(rows_data) ~= "table" then
+		return nil
+	end
+	local next_view = vim.deepcopy(table_view)
+	next_view.rows_data = rows_data
+	next_view.page_index = page_index or next_view.page_index or 0
+	next_view.page_size = page_size or next_view.page_size or #rows_data
+	next_view.total_rows = decode_total_rows_value(result.total_rows, next_view.total_rows)
+	if type(next_view.total_columns) ~= "number" then
+		next_view.total_columns = #next_view.column_names
+	end
+	return next_view
+end
+
+function M.table_view_lines(table_view)
+	return marimo_table_view_to_lines(table_view)
 end
 
 return M

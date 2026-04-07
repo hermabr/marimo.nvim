@@ -46,7 +46,7 @@ function M.setup(opts)
 				enabled = true
 			end
 		else
-			util.notify("usage: MarimoMode [on|off|toggle]", vim.log.levels.ERROR)
+			util.notify("usage: Marimo [on|off|toggle]", vim.log.levels.ERROR)
 			return
 		end
 
