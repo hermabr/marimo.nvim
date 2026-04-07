@@ -425,6 +425,35 @@ local function test_marshaled_json_outputs_render_text_and_images()
 	assert_truthy(not lines:match("application/vnd%.marimo%+mimebundle"), "expected mimebundle sentinel to stay hidden")
 end
 
+local function test_marshaled_json_float_outputs_render_without_plaintext_sentinels()
+	local render = dofile(vim.fn.getcwd() .. "/lua/marimo/render.lua")
+	local path = make_path("marshaled_json_float_output.py")
+	write_file(path, "# + {marimo}\n\nx = 1")
+	edit(path)
+
+	render.render(0, {
+		{
+			id = "cell-1",
+			projection_range = { start_line = 1, end_line = 3 },
+			runtime = {
+				output = {
+					mimetype = "application/json",
+					data = vim.json.encode({
+						"text/plain+float:0.0",
+						"text/plain+float:1.0",
+						"text/plain+float:2.5",
+					}),
+				},
+				console = {},
+			},
+		},
+	})
+
+	local lines = table.concat(rendered_lines(), "\n")
+	assert_matches(lines, "%[0%.0,1%.0,2%.5%]")
+	assert_truthy(not lines:match("text/plain%+float"), "expected float sentinel to stay hidden")
+end
+
 local function test_deactivation_clears_runtime_image_placements()
 	local path = make_path("runtime_image_cleanup.py")
 	reset_snacks_image_calls()
@@ -2161,6 +2190,7 @@ local tests = {
 	test_stringified_image_bundle_outputs_use_snacks_image,
 	test_console_mimebundle_outputs_render_as_images,
 	test_marshaled_json_outputs_render_text_and_images,
+	test_marshaled_json_float_outputs_render_without_plaintext_sentinels,
 	test_write_does_not_block_while_runtime_is_running,
 	test_editing_running_cell_and_autosync_do_not_block,
 	test_edits_interrupt_run_all_before_lower_cells_finish,

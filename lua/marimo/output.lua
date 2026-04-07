@@ -433,7 +433,7 @@ local function render_marshaled_json_output(data, opts)
 	if sanitized == rich_output.REMOVE then
 		return {}, nil
 	end
-	local ok, encoded = pcall(vim.json.encode, sanitized)
+	local ok, encoded = pcall(rich_output.stringify_marshaled_value, sanitized)
 	if not ok or type(encoded) ~= "string" then
 		return nil
 	end
