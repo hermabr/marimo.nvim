@@ -49,6 +49,17 @@ local function decode_marshaled_bundle(value)
 	return decode_stringified_bundle(value:sub(#prefix + 1))
 end
 
+local function parse_marshaled_leaf(value)
+	if type(value) ~= "string" then
+		return nil, nil
+	end
+	local separator = value:find(":", 1, true)
+	if separator == nil then
+		return nil, nil
+	end
+	return value:sub(1, separator - 1), value:sub(separator + 1)
+end
+
 local function is_array(value)
 	if type(value) ~= "table" then
 		return false
@@ -107,6 +118,71 @@ local function sanitize_marshaled_value(value)
 	return object
 end
 
+local stringify_marshaled_value
+
+local function stringify_marshaled_leaf(value)
+	local mimetype, data = parse_marshaled_leaf(value)
+	if mimetype == nil then
+		return nil
+	end
+	if mimetype == "text/plain+float" or mimetype == "text/plain+bigint" or mimetype == "text/plain+tuple" then
+		return data
+	end
+	if mimetype == "text/plain+set" then
+		local decoded = decode_json_value(data)
+		if decoded ~= nil then
+			return "set" .. stringify_marshaled_value(decoded)
+		end
+		return data
+	end
+	if mimetype == "text/plain" or mimetype == "text/html" or mimetype == "text/markdown" then
+		return vim.json.encode(data)
+	end
+	if mimetype == "application/json" then
+		local decoded = decode_json_value(data)
+		if decoded ~= nil then
+			return stringify_marshaled_value(decoded)
+		end
+		return vim.json.encode(data)
+	end
+	return nil
+end
+
+function stringify_marshaled_value(value)
+	if value == vim.NIL then
+		return "null"
+	end
+	if type(value) == "string" then
+		local rendered = stringify_marshaled_leaf(value)
+		if rendered ~= nil then
+			return rendered
+		end
+		return vim.json.encode(value)
+	end
+	if type(value) ~= "table" then
+		return vim.json.encode(value)
+	end
+	if is_array(value) then
+		local items = {}
+		for _, item in ipairs(value) do
+			table.insert(items, stringify_marshaled_value(item))
+		end
+		return "[" .. table.concat(items, ",") .. "]"
+	end
+	local keys = {}
+	for key, _ in pairs(value) do
+		table.insert(keys, key)
+	end
+	table.sort(keys, function(left, right)
+		return tostring(left) < tostring(right)
+	end)
+	local items = {}
+	for _, key in ipairs(keys) do
+		table.insert(items, vim.json.encode(key) .. ":" .. stringify_marshaled_value(value[key]))
+	end
+	return "{" .. table.concat(items, ",") .. "}"
+end
+
 local function find_first_bundle(value)
 	local marshaled_bundle = decode_marshaled_bundle(value)
 	if marshaled_bundle then
@@ -142,5 +218,6 @@ M.decode_marshaled_bundle = decode_marshaled_bundle
 M.find_first_bundle = find_first_bundle
 M.is_bundle = is_bundle
 M.sanitize_marshaled_value = sanitize_marshaled_value
+M.stringify_marshaled_value = stringify_marshaled_value
 
 return M
