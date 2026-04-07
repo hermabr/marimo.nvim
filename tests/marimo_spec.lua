@@ -1907,6 +1907,43 @@ Thing()
 	assert_truthy(not lines:match("%[html output%]"), "expected html table summary instead of placeholder")
 end
 
+local function test_runtime_html_tables_preserve_unicode_borders_when_width_fits()
+	local render = dofile(vim.fn.getcwd() .. "/lua/marimo/render.lua")
+	local path = make_path("runtime_html_table_unicode_width.py")
+	write_file(path, "# + {marimo}\n\nwide = None")
+	edit(path)
+
+	local headers = {}
+	local values = {}
+	for idx = 1, 12 do
+		table.insert(headers, string.format("<th>c%d</th>", idx))
+		table.insert(values, "<td>1</td>")
+	end
+
+	render.render(0, {
+		{
+			id = "cell-1",
+			projection_range = { start_line = 1, end_line = 3 },
+			runtime = {
+				output = {
+					mimetype = "text/html",
+					data = string.format(
+						"<table><thead><tr>%s</tr></thead><tbody><tr>%s</tr></tbody></table>",
+						table.concat(headers, ""),
+						table.concat(values, "")
+					),
+				},
+				console = {},
+			},
+		},
+	})
+
+	local lines = table.concat(rendered_lines(), "\n")
+	assert_matches(lines, "c12")
+	assert_truthy(not lines:match("<e2>"), "expected unicode table borders to remain valid utf-8")
+	assert_truthy(not lines:match("%[output truncated%]"), "expected width limit to apply to display cells, not bytes")
+end
+
 local function test_runtime_markdown_html_is_summarized_as_text()
 	local path = make_path("runtime_markdown_html.py")
 	write_file(path, '# + {marimo}\n\nimport marimo as mo\nmo.md("# hello")')
@@ -2294,6 +2331,7 @@ local tests = {
 	test_runtime_outputs_include_stdout_after_html_output,
 	test_runtime_uses_neovim_cwd_as_launch_cwd,
 	test_runtime_html_tables_are_summarized_as_text,
+	test_runtime_html_tables_preserve_unicode_borders_when_width_fits,
 	test_runtime_markdown_html_is_summarized_as_text,
 	test_runtime_tracebacks_are_summarized_as_text,
 	test_runtime_marimo_table_html_is_summarized_as_text,
