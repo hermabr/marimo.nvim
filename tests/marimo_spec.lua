@@ -1,11 +1,15 @@
 local snacks_image_calls = {
 	new = {},
 	closed = 0,
+	shown = 0,
+	updated = 0,
 }
 
 local function reset_snacks_image_calls()
 	snacks_image_calls.new = {}
 	snacks_image_calls.closed = 0
+	snacks_image_calls.shown = 0
+	snacks_image_calls.updated = 0
 end
 
 package.preload["snacks.image"] = function()
@@ -18,6 +22,12 @@ package.preload["snacks.image"] = function()
 				local placement = {}
 				function placement:close()
 					snacks_image_calls.closed = snacks_image_calls.closed + 1
+				end
+				function placement:show()
+					snacks_image_calls.shown = snacks_image_calls.shown + 1
+				end
+				function placement:update()
+					snacks_image_calls.updated = snacks_image_calls.updated + 1
 				end
 				table.insert(snacks_image_calls.new, {
 					bufnr = bufnr,
@@ -297,6 +307,9 @@ local function test_runtime_image_outputs_use_snacks_image()
 	wait_for_truthy(function()
 		return #snacks_image_calls.new > 0
 	end, "timed out waiting for runtime image placement")
+	wait_for_truthy(function()
+		return snacks_image_calls.updated > 0 and snacks_image_calls.shown > 0
+	end, "timed out waiting for snacks image refresh")
 
 	local call = snacks_image_calls.new[#snacks_image_calls.new]
 	assert_truthy(call.bufnr == 0 or call.bufnr == vim.api.nvim_get_current_buf(), "expected current-buffer placement")
