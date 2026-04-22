@@ -1224,6 +1224,45 @@ mo.ui.table(rows, pagination=True, page_size=10)
 	assert_eq(select(2, text:gsub("│ %.%.%.%s*│", "")), 1, "expected resized first page to show a bottom ellipsis row")
 end
 
+local function test_marimo_output_html_table_opens_table_preview()
+	local path = make_path("output_float_html_table.py")
+	write_file(
+		path,
+		[[# + {marimo}
+
+class Thing:
+    def _repr_html_(self):
+        return "<div><small>shape: (3, 1)</small><table><thead><tr><th>number</th></tr><tr><td>i64</td></tr></thead><tbody><tr><td>1</td></tr><tr><td>2</td></tr><tr><td>3</td></tr></tbody></table></div>"
+
+Thing()
+]]
+	)
+	edit(path)
+
+	vim.cmd("Marimo on")
+	vim.cmd("MarimoRunAll")
+	wait_for_match("│ number │")
+	wait_for_match("│ 3%s+│")
+
+	vim.api.nvim_win_set_cursor(0, { 7, 0 })
+	vim.cmd("MarimoOutput")
+	local float_win = find_output_floating_window()
+	assert_truthy(float_win ~= nil, "expected output float for html table preview test")
+
+	local float_bufnr = vim.api.nvim_win_get_buf(float_win)
+	wait_for_truthy(function()
+		local lines = vim.api.nvim_buf_get_lines(float_bufnr, 0, -1, false)
+		return table.concat(lines, "\n"):match("table preview | rows 1%-3 of 3") ~= nil
+	end, "timed out waiting for html table preview header")
+
+	local lines = vim.api.nvim_buf_get_lines(float_bufnr, 0, -1, false)
+	local text = table.concat(lines, "\n")
+	assert_matches(text, "table preview | rows 1%-3 of 3")
+	assert_matches(text, "│ number │")
+	assert_matches(text, "│ i64%s+│")
+	assert_matches(text, "│ 3%s+│")
+end
+
 local function test_jump_next_cell_appends_new_cell_and_enters_insert_mode()
 	local path = make_path("navigation_append.py")
 	write_file(path, "# + {marimo}\n\nx = 1\n")
@@ -2039,6 +2078,34 @@ local function test_runtime_marimo_table_html_is_summarized_as_text()
 	assert_truthy(not lines:match("marimo%-table"), "expected custom element markup to be stripped")
 end
 
+local function test_runtime_marimo_table_nested_values_render_as_text()
+	local render = dofile(vim.fn.getcwd() .. "/lua/marimo/render.lua")
+	local path = make_path("runtime_marimo_table_nested.py")
+	write_file(path, "# + {marimo}\n\nnested = None")
+	edit(path)
+
+	render.render(0, {
+		{
+			id = "cell-1",
+			projection_range = { start_line = 1, end_line = 3 },
+			runtime = {
+				output = {
+					mimetype = "text/html",
+					data = "<marimo-ui-element object-id='table-1' random-id='table-2'><marimo-table data-initial-value='[]' data-label='null' data-data='&quot;[{&#92;&quot;number&#92;&quot;:1,&#92;&quot;losses&#92;&quot;:[1,2,3],&#92;&quot;weights&#92;&quot;:{&#92;&quot;a&#92;&quot;:4,&#92;&quot;b&#92;&quot;:5}}]&quot;' data-total-rows='1' data-total-columns='3' data-max-columns='50' data-banner-text='&quot;&quot;' data-pagination='true' data-page-size='10' data-field-types='[[&quot;number&quot;,[&quot;integer&quot;,&quot;i64&quot;]],[&quot;losses&quot;,[&quot;array&quot;,&quot;list[i64]&quot;]],[&quot;weights&quot;,[&quot;object&quot;,&quot;struct&quot;]]]' data-show-filters='true' data-show-download='true' data-show-column-summaries='false' data-show-data-types='true' data-show-page-size-selector='true' data-show-column-explorer='true' data-show-chart-builder='false' data-row-headers='[]' data-has-stable-row-id='false' data-lazy='false' data-preload='false' data-download-file-name='&quot;df&quot;'></marimo-table></marimo-ui-element>",
+				},
+				console = {},
+			},
+		},
+	})
+
+	local lines = table.concat(rendered_lines(), "\n")
+	assert_matches(lines, "shape: %(1, 3%)")
+	assert_matches(lines, "losses")
+	assert_matches(lines, "%[1,2,3%]")
+	assert_matches(lines, '{\"a\":4,\"b\":5}')
+	assert_truthy(not lines:match("table: 0x"), "expected nested table values to render as text")
+end
+
 local function test_runtime_errors_include_descriptive_stderr_context()
 	local path = make_path("runtime_error_details.py")
 	write_file(path, "# + {marimo}\n\nimport numpy as np\n= np.array(object=[1, 2, 3])\nx")
@@ -2316,6 +2383,7 @@ local tests = {
 	test_marimo_output_preserves_relative_numbers_and_wraps_lines,
 	test_marimo_output_renders_images_in_float,
 	test_marimo_output_table_float_supports_paging_and_rows_per_page,
+	test_marimo_output_html_table_opens_table_preview,
 	test_jump_next_cell_appends_new_cell_and_enters_insert_mode,
 	test_render_partial_updates_preserve_unrelated_extmarks,
 	test_completed_run_clears_pending_runtime_without_idle_status,
@@ -2348,6 +2416,7 @@ local tests = {
 	test_runtime_markdown_html_is_summarized_as_text,
 	test_runtime_tracebacks_are_summarized_as_text,
 	test_runtime_marimo_table_html_is_summarized_as_text,
+	test_runtime_marimo_table_nested_values_render_as_text,
 	test_runtime_errors_include_descriptive_stderr_context,
 	test_runtime_errors_show_multiple_definition_details,
 	test_run_current_cell_command_refreshes_output,

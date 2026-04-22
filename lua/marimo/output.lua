@@ -3,6 +3,7 @@ local dir = vim.fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":h")
 local rich_output = dofile(dir .. "/rich_output.lua")
 local util = dofile(dir .. "/util.lua")
 local INTERNAL_ROW_ID_COLUMN = "_marimo_row_id"
+local MAX_TABLE_CELL_CHARS = 48
 
 local function as_string(value)
 	if type(value) == "string" then
@@ -91,6 +92,17 @@ local function normalize_text_line(text)
 	return vim.trim(text:gsub("%s+", " "))
 end
 
+local function truncate_table_cell_text(text)
+	local normalized = normalize_text_line(text)
+	if normalized == "" then
+		return ""
+	end
+	if vim.fn.strdisplaywidth(normalized) > MAX_TABLE_CELL_CHARS then
+		return util.truncate_display_text(normalized, MAX_TABLE_CELL_CHARS, "...")
+	end
+	return normalized
+end
+
 local function fragment_to_lines(fragment)
 	if type(fragment) ~= "string" or fragment == "" then
 		return {}
@@ -169,6 +181,23 @@ local function table_content_line(row, widths)
 	return "│" .. table.concat(padded, "┆") .. "│"
 end
 
+local function table_header_row_count(table_html)
+	if type(table_html) ~= "string" or table_html == "" then
+		return 0
+	end
+	local header_rows = 0
+	for thead_html in table_html:gmatch("<[Tt][Hh][Ee][Aa][Dd][^>]*>(.-)</[Tt][Hh][Ee][Aa][Dd]>") do
+		header_rows = header_rows + #parse_table_rows(thead_html)
+	end
+	if header_rows == 0 then
+		local first_row_html = table_html:match("<[Tt][Rr][^>]*>(.-)</[Tt][Rr]>")
+		if type(first_row_html) == "string" and first_row_html:match("<[Tt][Hh][^>]*>") then
+			header_rows = 1
+		end
+	end
+	return header_rows
+end
+
 local function render_table_rows(lines, rows, opts)
 	if #rows == 0 then
 		return lines
@@ -194,17 +223,8 @@ local function table_to_lines(table_html)
 	if type(table_html) ~= "string" or table_html == "" then
 		return {}
 	end
-	local header_rows = 0
-	for thead_html in table_html:gmatch("<[Tt][Hh][Ee][Aa][Dd][^>]*>(.-)</[Tt][Hh][Ee][Aa][Dd]>") do
-		header_rows = header_rows + #parse_table_rows(thead_html)
-	end
+	local header_rows = table_header_row_count(table_html)
 	local rows = parse_table_rows(table_html)
-	if header_rows == 0 then
-		local first_row_html = table_html:match("<[Tt][Rr][^>]*>(.-)</[Tt][Rr]>")
-		if type(first_row_html) == "string" and first_row_html:match("<[Tt][Hh][^>]*>") then
-			header_rows = 1
-		end
-	end
 	return render_table_rows({}, rows, { header_rows = header_rows })
 end
 
@@ -434,6 +454,97 @@ local function marimo_table_view_from_html(text)
 	}
 end
 
+local function html_table_view_from_html(text)
+	if type(text) ~= "string" or text == "" then
+		return nil
+	end
+	local table_html = strip_non_content_blocks(text):match("(<[Tt][Aa][Bb][Ll][Ee][^>]*>.-</[Tt][Aa][Bb][Ll][Ee]>)")
+	if type(table_html) ~= "string" or table_html == "" then
+		return nil
+	end
+	local rows = parse_table_rows(table_html)
+	if #rows == 0 then
+		return nil
+	end
+
+	local header_rows = table_header_row_count(table_html)
+	local column_names = {}
+	local type_names = {}
+	local data_start = 1
+
+	if header_rows > 0 then
+		for _, cell in ipairs(rows[1] or {}) do
+			table.insert(column_names, tostring(cell))
+		end
+		data_start = 2
+		if header_rows > 1 and #column_names > 0 then
+			for idx = 1, #column_names do
+				table.insert(type_names, tostring((rows[2] or {})[idx] or ""))
+			end
+			data_start = 3
+		end
+	else
+		local width = 0
+		for _, row in ipairs(rows) do
+			width = math.max(width, #row)
+		end
+		for idx = 1, width do
+			table.insert(column_names, string.format("column_%d", idx))
+		end
+	end
+
+	local rows_data = {}
+	for row_idx = data_start, #rows do
+		local row = rows[row_idx]
+		if type(row) == "table" then
+			local row_data = {}
+			for col_idx, column_name in ipairs(column_names) do
+				row_data[column_name] = row[col_idx] or ""
+			end
+			table.insert(rows_data, row_data)
+		end
+	end
+
+	return {
+		namespace = nil,
+		pagination = false,
+		page_index = 0,
+		page_size = math.max(#rows_data, 1),
+		total_rows = #rows_data,
+		total_columns = #column_names,
+		column_names = column_names,
+		type_names = #type_names == #column_names and type_names or {},
+		rows_data = rows_data,
+	}
+end
+
+local function table_cell_text(value)
+	if value == nil or value == vim.NIL then
+		return ""
+	end
+	if type(value) == "table" then
+		local bundle = rich_output.find_first_bundle(value)
+		if type(bundle) == "table" then
+			if type(bundle["text/plain"]) == "string" then
+				return truncate_table_cell_text(bundle["text/plain"])
+			end
+			if type(bundle["text/html"]) == "string" then
+				return "[html output]"
+			end
+			return "[rich output]"
+		end
+		local sanitized = rich_output.sanitize_marshaled_value(value)
+		if sanitized == rich_output.REMOVE then
+			return ""
+		end
+		local ok, text = pcall(rich_output.stringify_marshaled_value, sanitized)
+		if ok and type(text) == "string" then
+			return truncate_table_cell_text(text)
+		end
+	end
+	return truncate_table_cell_text(tostring(value))
+end
+
 local function marimo_table_view_to_lines(table_view)
 	if type(table_view) ~= "table" then
 		return {}
@@ -473,12 +584,7 @@ local function marimo_table_view_to_lines(table_view)
 			if type(row_data) == "table" then
 				local row = {}
 				for _, column_name in ipairs(column_names) do
-					local value = row_data[column_name]
-					if value == nil then
-						table.insert(row, "")
-					else
-						table.insert(row, normalize_text_line(tostring(value)))
-					end
+					table.insert(row, table_cell_text(row_data[column_name]))
 				end
 				table.insert(table_rows, row)
 			end
@@ -832,14 +938,14 @@ function M.extract_table_view(output)
 	local mimetype = as_string(output.mimetype) or ""
 	local data = output.data
 	if mimetype == "text/html" and type(data) == "string" then
-		return marimo_table_view_from_html(data)
+		return marimo_table_view_from_html(data) or html_table_view_from_html(data)
 	end
 	if mimetype == "application/vnd.marimo+mimebundle" and type(data) == "table" and type(data["text/html"]) == "string" then
-		return marimo_table_view_from_html(data["text/html"])
+		return marimo_table_view_from_html(data["text/html"]) or html_table_view_from_html(data["text/html"])
 	end
 	local decoded_bundle = rich_output.decode_stringified_bundle(data)
 	if type(decoded_bundle) == "table" and type(decoded_bundle["text/html"]) == "string" then
-		return marimo_table_view_from_html(decoded_bundle["text/html"])
+		return marimo_table_view_from_html(decoded_bundle["text/html"]) or html_table_view_from_html(decoded_bundle["text/html"])
 	end
 	return nil
 end
