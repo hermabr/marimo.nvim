@@ -1,5 +1,6 @@
 local M = {}
 local next_local_id = 0
+local redraw_pending = false
 
 function M.notify(msg, level)
 	if vim.g.marimo_shutting_down == true or tonumber(vim.v.exiting) ~= 0 then
@@ -77,7 +78,12 @@ function M.as_json_object(tbl)
 end
 
 function M.request_redraw()
+	if redraw_pending then
+		return
+	end
+	redraw_pending = true
 	vim.schedule(function()
+		redraw_pending = false
 		pcall(vim.cmd, "redraw")
 	end)
 end

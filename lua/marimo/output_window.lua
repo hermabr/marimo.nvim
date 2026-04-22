@@ -27,6 +27,15 @@ local function clear_state(bufnr)
 	window_state[bufnr] = nil
 end
 
+local function contains_cell_id(cell_ids, cell_id)
+	for _, current in ipairs(cell_ids or {}) do
+		if current == cell_id then
+			return true
+		end
+	end
+	return false
+end
+
 local function close_window(winid)
 	if winid and vim.api.nvim_win_is_valid(winid) then
 		pcall(vim.api.nvim_win_close, winid, true)
@@ -698,7 +707,7 @@ update_entry = function(source_bufnr, entry, cell, display, preserve_view)
 	return true
 end
 
-function M.refresh(bufnr)
+function M.refresh(bufnr, opts)
 	bufnr = bufnr or vim.api.nvim_get_current_buf()
 	local entry = window_state[bufnr]
 	if not entry then
@@ -709,6 +718,14 @@ function M.refresh(bufnr)
 		return
 	end
 	local cell = find_cell_by_id(bufnr, entry.cell_id)
+	if not cell or contains_cell_id((opts or {}).deleted_ids, entry.cell_id) then
+		M.close(bufnr)
+		return
+	end
+	if opts and opts.changed_ids and not contains_cell_id(opts.changed_ids, entry.cell_id) then
+		sync_runtime_timer(bufnr, entry, cell, runtime_for_cell(bufnr, cell))
+		return false
+	end
 	local display = cell_display(bufnr, cell, entry)
 	if not display then
 		M.close(bufnr)

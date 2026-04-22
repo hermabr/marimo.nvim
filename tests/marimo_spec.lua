@@ -1358,6 +1358,44 @@ local function test_completed_run_clears_pending_runtime_without_idle_status()
 	assert_truthy(not vim.tbl_contains(changed_ids or {}, "cell-3"))
 end
 
+local function test_attach_runtime_in_place_updates_only_changed_cells()
+	local runtime = dofile(vim.fn.getcwd() .. "/lua/marimo/runtime.lua")
+	local cells = {
+		{
+			id = "cell-1",
+			runtime = {
+				output = { mimetype = "text/plain", data = "old-1" },
+				console = {},
+			},
+		},
+		{
+			id = "cell-2",
+			runtime = {
+				output = { mimetype = "text/plain", data = "old-2" },
+				console = {},
+			},
+		},
+	}
+	local untouched_runtime = cells[2].runtime
+	local runtime_by_id = {
+		["cell-1"] = {
+			output = { mimetype = "text/plain", data = "new-1" },
+			console = {},
+		},
+		["cell-2"] = {
+			output = { mimetype = "text/plain", data = "new-2" },
+			console = {},
+		},
+	}
+
+	runtime.attach_runtime_in_place(cells, runtime_by_id, { "cell-1" })
+	runtime_by_id["cell-1"].output.data = "mutated-after-attach"
+
+	assert_eq(cells[1].runtime.output.data, "new-1")
+	assert_truthy(cells[2].runtime == untouched_runtime, "expected untouched cells to keep their existing runtime table")
+	assert_eq(cells[2].runtime.output.data, "old-2")
+end
+
 local function test_runtime_outputs_render_below_cells()
 	local path = make_path("runtime_outputs.py")
 	write_file(path, "# + {marimo}\n\nx = 1\nx\n\n# +\n\ny = x + 1\ny")
@@ -2319,6 +2357,7 @@ local tests = {
 	test_jump_next_cell_appends_new_cell_and_enters_insert_mode,
 	test_render_partial_updates_preserve_unrelated_extmarks,
 	test_completed_run_clears_pending_runtime_without_idle_status,
+	test_attach_runtime_in_place_updates_only_changed_cells,
 	test_runtime_outputs_render_below_cells,
 	test_runtime_image_outputs_use_snacks_image,
 	test_stringified_image_bundle_outputs_use_snacks_image,

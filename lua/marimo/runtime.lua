@@ -137,6 +137,23 @@ function M.attach_runtime(cells, runtime_by_id)
 	return attached
 end
 
+function M.attach_runtime_in_place(cells, runtime_by_id, cell_ids)
+	local target_lookup = nil
+	if cell_ids ~= nil then
+		target_lookup = {}
+		for _, cell_id in ipairs(cell_ids) do
+			target_lookup[cell_id] = true
+		end
+	end
+
+	for _, cell in ipairs(cells or {}) do
+		if target_lookup == nil or target_lookup[cell.id] or cell.runtime == nil then
+			cell.runtime = vim.deepcopy(runtime_by_id[cell.id] or default_runtime())
+		end
+	end
+	return cells
+end
+
 function M.filter_runtime(runtime_by_id, cells)
 	local keep = {}
 	for _, cell in ipairs(cells or {}) do

@@ -175,11 +175,12 @@ local function runtime_metadata(bufnr)
 end
 
 local function refresh_cells(bufnr, opts)
+	opts = opts or {}
 	local runtime_cells = vim.b[bufnr].marimo_runtime_cells or {}
 	local current_cells = vim.b[bufnr].marimo_cells or {}
-	vim.b[bufnr].marimo_cells = runtime.attach_runtime(current_cells, runtime_cells)
+	vim.b[bufnr].marimo_cells = runtime.attach_runtime_in_place(current_cells, runtime_cells, opts.changed_ids)
 	render.render(bufnr, vim.b[bufnr].marimo_cells, opts)
-	output_window.refresh(bufnr)
+	output_window.refresh(bufnr, opts)
 	util.request_redraw()
 end
 
