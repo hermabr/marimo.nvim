@@ -2106,6 +2106,33 @@ local function test_runtime_marimo_table_nested_values_render_as_text()
 	assert_truthy(not lines:match("table: 0x"), "expected nested table values to render as text")
 end
 
+local function test_runtime_marimo_callout_html_is_summarized_as_text()
+	local render = dofile(vim.fn.getcwd() .. "/lua/marimo/render.lua")
+	local path = make_path("runtime_marimo_callout.py")
+	write_file(path, "# + {marimo}\n\ncallout = None")
+	edit(path)
+
+	render.render(0, {
+		{
+			id = "cell-1",
+			projection_range = { start_line = 1, end_line = 3 },
+			runtime = {
+				output = {
+					mimetype = "text/html",
+					data = "<marimo-callout-output data-html='&quot;<div><strong>Your output is too large</strong></div><div>Set <code>MARIMO_OUTPUT_MAX_BYTES</code></div>&quot;' data-kind='&quot;danger&quot;'></marimo-callout-output>",
+				},
+				console = {},
+			},
+		},
+	})
+
+	local lines = table.concat(rendered_lines(), "\n")
+	assert_matches(lines, "Your output is too large")
+	assert_matches(lines, "MARIMO_OUTPUT_MAX_BYTES")
+	assert_truthy(not lines:match("%[html output%]"), "expected marimo callout html to render as text")
+	assert_truthy(not lines:match("marimo%-callout%-output"), "expected custom callout markup to be stripped")
+end
+
 local function test_runtime_errors_include_descriptive_stderr_context()
 	local path = make_path("runtime_error_details.py")
 	write_file(path, "# + {marimo}\n\nimport numpy as np\n= np.array(object=[1, 2, 3])\nx")
@@ -2417,6 +2444,7 @@ local tests = {
 	test_runtime_tracebacks_are_summarized_as_text,
 	test_runtime_marimo_table_html_is_summarized_as_text,
 	test_runtime_marimo_table_nested_values_render_as_text,
+	test_runtime_marimo_callout_html_is_summarized_as_text,
 	test_runtime_errors_include_descriptive_stderr_context,
 	test_runtime_errors_show_multiple_definition_details,
 	test_run_current_cell_command_refreshes_output,

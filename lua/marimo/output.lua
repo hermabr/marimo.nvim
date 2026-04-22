@@ -607,13 +607,37 @@ local function marimo_table_to_lines(text)
 	return marimo_table_view_to_lines(table_view)
 end
 
-local function html_to_lines(text)
+local function marimo_callout_html_from_html(text)
+	if type(text) ~= "string" or text == "" then
+		return nil
+	end
+	local tag_html = text:match("<[Mm][Aa][Rr][Ii][Mm][Oo]%-[Cc][Aa][Ll][Ll][Oo][Uu][Tt]%-[Oo][Uu][Tt][Pp][Uu][Tt][^>]*>")
+	if type(tag_html) ~= "string" or tag_html == "" then
+		return nil
+	end
+	local html = decode_json_attribute(extract_tag_attribute(tag_html, "data%-html"))
+	if type(html) ~= "string" or html == "" then
+		return nil
+	end
+	return html
+end
+
+local html_to_lines
+
+html_to_lines = function(text)
 	if type(text) ~= "string" or text == "" then
 		return {}
 	end
 	local marimo_table_lines = marimo_table_to_lines(text)
 	if #marimo_table_lines > 0 then
 		return marimo_table_lines
+	end
+	local marimo_callout_html = marimo_callout_html_from_html(text)
+	if type(marimo_callout_html) == "string" and marimo_callout_html ~= "" then
+		local callout_lines = html_to_lines(marimo_callout_html)
+		if #callout_lines > 0 then
+			return callout_lines
+		end
 	end
 	local lines = {}
 	local normalized = strip_non_content_blocks(text)
