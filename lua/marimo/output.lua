@@ -401,6 +401,19 @@ local function ellipsis_table_row(column_count)
 	return row
 end
 
+local function table_cell_preview(value)
+	if value == nil then
+		return ""
+	end
+	if type(value) == "table" and vim.json ~= nil then
+		local ok, encoded = pcall(vim.json.encode, value)
+		if ok and type(encoded) == "string" then
+			return normalize_text_line(encoded)
+		end
+	end
+	return normalize_text_line(tostring(value))
+end
+
 local function marimo_table_view_from_html(text)
 	if type(text) ~= "string" or text == "" then
 		return nil
@@ -474,11 +487,7 @@ local function marimo_table_view_to_lines(table_view)
 				local row = {}
 				for _, column_name in ipairs(column_names) do
 					local value = row_data[column_name]
-					if value == nil then
-						table.insert(row, "")
-					else
-						table.insert(row, normalize_text_line(tostring(value)))
-					end
+					table.insert(row, table_cell_preview(value))
 				end
 				table.insert(table_rows, row)
 			end

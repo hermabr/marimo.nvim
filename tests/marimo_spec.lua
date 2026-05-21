@@ -2039,6 +2039,34 @@ local function test_runtime_marimo_table_html_is_summarized_as_text()
 	assert_truthy(not lines:match("marimo%-table"), "expected custom element markup to be stripped")
 end
 
+local function test_runtime_marimo_table_previews_list_and_struct_cells()
+	local render = dofile(vim.fn.getcwd() .. "/lua/marimo/render.lua")
+	local path = make_path("runtime_marimo_table_nested.py")
+	write_file(path, "# + {marimo}\n\ndf = None")
+	edit(path)
+
+	render.render(0, {
+		{
+			id = "cell-1",
+			projection_range = { start_line = 1, end_line = 3 },
+			runtime = {
+				output = {
+					mimetype = "text/html",
+					data = "<marimo-ui-element object-id='table-1'><marimo-table data-data='&quot;[{&#92;&quot;items&#92;&quot;:[1,2,3],&#92;&quot;meta&#92;&quot;:{&#92;&quot;name&#92;&quot;:&#92;&quot;alpha&#92;&quot;,&#92;&quot;ok&#92;&quot;:true}}]&quot;' data-total-rows='1' data-total-columns='2' data-pagination='true' data-page-size='10' data-field-types='[[&quot;items&quot;,[&quot;list&quot;,&quot;list[i64]&quot;]],[&quot;meta&quot;,[&quot;struct&quot;,&quot;struct[2]&quot;]]]'></marimo-table></marimo-ui-element>",
+				},
+				console = {},
+			},
+		},
+	})
+
+	local lines = table.concat(rendered_lines(), "\n")
+	assert_matches(lines, "│ list%[i64%]%s+┆ struct%[2%]%s+│")
+	assert_matches(lines, "│ %s*%[1,2,3%]%s+┆")
+	assert_matches(lines, '"name":"alpha"')
+	assert_matches(lines, '"ok":true')
+	assert_truthy(not lines:match("table: 0x"), "expected nested table values to render as previews")
+end
+
 local function test_runtime_errors_include_descriptive_stderr_context()
 	local path = make_path("runtime_error_details.py")
 	write_file(path, "# + {marimo}\n\nimport numpy as np\n= np.array(object=[1, 2, 3])\nx")
@@ -2348,6 +2376,7 @@ local tests = {
 	test_runtime_markdown_html_is_summarized_as_text,
 	test_runtime_tracebacks_are_summarized_as_text,
 	test_runtime_marimo_table_html_is_summarized_as_text,
+	test_runtime_marimo_table_previews_list_and_struct_cells,
 	test_runtime_errors_include_descriptive_stderr_context,
 	test_runtime_errors_show_multiple_definition_details,
 	test_run_current_cell_command_refreshes_output,
