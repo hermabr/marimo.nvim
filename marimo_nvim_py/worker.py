@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 import queue
+import signal
 import sys
 import threading
+from contextlib import suppress
 from typing import Any
 
 from marimo_nvim_py.session_manager import Worker
@@ -11,6 +14,18 @@ from marimo_nvim_py.session_manager import Worker
 
 def _error(code: str, message: str) -> dict[str, Any]:
     return {"code": code, "message": message}
+
+
+def _kernel_idle_timeout_seconds() -> float | None:
+    raw = os.environ.get("MARIMO_NVIM_KERNEL_IDLE_TIMEOUT_MS")
+    if raw is None or raw == "":
+        return 30 * 60
+    with suppress(ValueError):
+        timeout_ms = float(raw)
+        if timeout_ms <= 0:
+            return None
+        return timeout_ms / 1000
+    return 30 * 60
 
 
 def main() -> int:
@@ -27,7 +42,19 @@ def main() -> int:
             sys.stdout.write(json.dumps(payload) + "\n")
             sys.stdout.flush()
 
-    worker = Worker(event_sink=emit_event)
+    worker = Worker(
+        event_sink=emit_event,
+        kernel_idle_timeout_seconds=_kernel_idle_timeout_seconds(),
+    )
+
+    def shutdown_from_signal(signum: int, _frame: Any) -> None:
+        with suppress(Exception):
+            worker.shutdown({})
+        raise SystemExit(128 + signum)
+
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(signum, shutdown_from_signal)
+
     methods = {
         "load_raw_notebook": worker.load_raw_notebook,
         "serialize_notebook": worker.serialize_notebook,
@@ -75,22 +102,26 @@ def main() -> int:
     request_thread = threading.Thread(target=request_loop, daemon=True)
     request_thread.start()
 
-    for raw in sys.stdin:
-        raw = raw.strip()
-        if not raw:
-            continue
-        try:
-            payload = json.loads(raw)
-        except Exception as exc:  # noqa: BLE001
-            emit_response({"id": None, "ok": False, "error": _error("protocol_error", str(exc))})
-            continue
-        if payload.get("method") == "interrupt":
-            handle_payload(payload, allow_immediate_interrupt=True)
-            continue
-        request_queue.put(payload)
-    request_queue.put(None)
-    request_thread.join()
-    return 0
+    try:
+        for raw in sys.stdin:
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                payload = json.loads(raw)
+            except Exception as exc:  # noqa: BLE001
+                emit_response({"id": None, "ok": False, "error": _error("protocol_error", str(exc))})
+                continue
+            if payload.get("method") == "interrupt":
+                handle_payload(payload, allow_immediate_interrupt=True)
+                continue
+            request_queue.put(payload)
+        request_queue.put(None)
+        request_thread.join()
+        return 0
+    finally:
+        with suppress(Exception):
+            worker.shutdown({})
 
 
 if __name__ == "__main__":

@@ -83,6 +83,9 @@ require("marimo").setup({
   execution = {
     mode = "eager", -- or "lazy"
   },
+  runtime = {
+    idle_timeout_ms = 30 * 60 * 1000, -- set to 0 to disable kernel sleep
+  },
   keymaps = {
     mode_toggle = "<leader>mm",
     execution_toggle = "<leader>ml",
@@ -110,6 +113,11 @@ buffer at runtime with `<leader>ml` or `:MarimoExecution`. With no arguments,
 In lazy mode, edit-time sync still updates the projected buffer and stale
 markers, but it does not queue runtime execution until you explicitly run a
 cell or the whole notebook.
+
+`runtime.idle_timeout_ms` controls how long an idle kernel process is kept
+alive after its last command or runtime event. Sleeping keeps the projected
+buffer and notebook session state in Neovim; the next runtime action starts a
+fresh kernel and stale outputs are marked before new results arrive.
 
 Projected marimo buffers show a small text-only floating indicator in the
 top-right corner of the window:

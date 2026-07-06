@@ -542,6 +542,12 @@ local function handle_runtime_event(bufnr, request_id, event)
 	if request_id and (not active or active.request_id ~= request_id) then
 		return
 	end
+	if type(event.operation) == "table" and event.operation.op == "kernel-restarted" then
+		if active and active.snapshot then
+			mark_cells_stale(bufnr, runnable_untouched_cell_ids(active.snapshot, active.pending_cell_ids or {}))
+		end
+		return
+	end
 	local runtime_cells, changed, changed_ids = runtime.apply_operation(vim.b[bufnr].marimo_runtime_cells or {}, event.operation)
 	if changed then
 		vim.b[bufnr].marimo_runtime_cells = runtime_cells
@@ -628,6 +634,8 @@ local function submit_runtime_request(bufnr, request)
 		kind = request.kind,
 		awaits_events = request.awaits_events,
 		saw_operation = false,
+		snapshot = request.snapshot,
+		pending_cell_ids = request.pending_cell_ids,
 		followup_snapshot = request.followup_snapshot,
 	}
 end
@@ -725,6 +733,7 @@ local function queue_runtime_sync(bufnr, snapshot, run_ids, delete_ids)
 	entry.pending_sync = {
 		kind = "sync",
 		method = "sync_notebook",
+		snapshot = vim.deepcopy(snapshot),
 		params = {
 			snapshot = vim.deepcopy(snapshot),
 			run_ids = vim.deepcopy(run_ids),
@@ -760,6 +769,7 @@ queue_runtime_run = function(bufnr, snapshot, cell_ids, codes)
 	entry.pending_run = {
 		kind = "run",
 		method = "run_cells",
+		snapshot = vim.deepcopy(snapshot),
 		params = {
 			session_id = vim.b[bufnr].marimo_session_id,
 			snapshot = vim.deepcopy(snapshot),

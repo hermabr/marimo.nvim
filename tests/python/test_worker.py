@@ -433,3 +433,37 @@ def test_worker_run_cells_accepts_snapshot_for_session_creation(tmp_path: Path) 
     )
     assert any(event.get("request_id") == 17 for event in events)
     worker.shutdown({})
+
+
+def test_worker_sleeps_idle_kernel_and_restarts_on_next_run(tmp_path: Path) -> None:
+    events: list[dict[str, Any]] = []
+    worker = Worker(event_sink=events.append, kernel_idle_timeout_seconds=0.05)
+    snapshot = build_snapshot(tmp_path / "idle_restart.py")
+
+    worker.ensure_session({"snapshot": snapshot, "_request_id": 23})
+    session = worker.sessions[snapshot["session_id"]]
+    wait_for_truthy(lambda: session.kernel is None, timeout=5.0)
+
+    result = worker.run_cells(
+        {
+            "snapshot": snapshot,
+            "cell_ids": ["cell-1"],
+            "codes": ["x = 3\nx"],
+            "_request_id": 24,
+        }
+    )
+
+    assert result == {"session_id": snapshot["session_id"], "submitted": True}
+    assert any(
+        event.get("request_id") == 24
+        and event.get("operation", {}).get("op") == "kernel-restarted"
+        for event in events
+    )
+    wait_for_truthy(
+        lambda: any(
+            output_text(event["operation"]) == "3"
+            for event in events
+            if event.get("operation", {}).get("op") == "cell-op"
+        )
+    )
+    worker.shutdown({})

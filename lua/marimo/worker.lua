@@ -7,6 +7,9 @@ local M = {}
 
 local workers = {}
 local next_request_id = 0
+local config = {
+	idle_timeout_ms = 30 * 60 * 1000,
+}
 
 vim.g.marimo_shutting_down = false
 
@@ -47,6 +50,12 @@ local function launch_spec(path)
 		project_root = project_root,
 		runtime_kind = runtime_kind,
 		cmd = cmd,
+	}
+end
+
+local function worker_env()
+	return {
+		MARIMO_NVIM_KERNEL_IDLE_TIMEOUT_MS = tostring(config.idle_timeout_ms or 0),
 	}
 end
 
@@ -118,6 +127,7 @@ local function ensure_worker(path)
 	end
 
 	worker.job_id = vim.fn.jobstart(spec.cmd, {
+		env = worker_env(),
 		stdout_buffered = false,
 		stderr_buffered = true,
 		on_stdout = function(_, data)
@@ -243,6 +253,7 @@ function M.request_isolated_async(path, method, params, callback)
 	local stdout_chunks = {}
 	local last_error = nil
 	local job_id = vim.fn.jobstart(spec.cmd, {
+		env = worker_env(),
 		stdout_buffered = true,
 		stderr_buffered = true,
 		on_stdout = function(_, data)
@@ -313,6 +324,13 @@ function M.shutdown_all()
 		pcall(vim.fn.chansend, worker.job_id, vim.json.encode({ id = -1, method = "shutdown", params = {} }) .. "\n")
 		pcall(vim.fn.jobstop, worker.job_id)
 		workers[project_root] = nil
+	end
+end
+
+function M.configure(opts)
+	opts = opts or {}
+	if opts.idle_timeout_ms ~= nil then
+		config.idle_timeout_ms = opts.idle_timeout_ms
 	end
 end
 

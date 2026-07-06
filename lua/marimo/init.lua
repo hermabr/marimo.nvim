@@ -16,6 +16,9 @@ local setup_opts = {
 	execution = {
 		mode = "eager",
 	},
+	runtime = {
+		idle_timeout_ms = 30 * 60 * 1000,
+	},
 	keymaps = {
 		mode_toggle = "<leader>mm",
 		execution_toggle = "<leader>ml",
@@ -201,6 +204,17 @@ local function normalize_execution_opts(opts)
 	return execution
 end
 
+local function normalize_runtime_opts(opts)
+	local runtime = vim.deepcopy(opts or {})
+	if runtime.idle_timeout_ms == nil then
+		runtime.idle_timeout_ms = 30 * 60 * 1000
+	end
+	if type(runtime.idle_timeout_ms) ~= "number" or runtime.idle_timeout_ms < 0 then
+		error("marimo.setup runtime.idle_timeout_ms must be a non-negative number")
+	end
+	return runtime
+end
+
 M.project_buffer = function(bufnr, opts)
 	opts = opts or {}
 	opts.ensure_projected_buffer_setup = opts.ensure_projected_buffer_setup or ensure_projected_buffer_setup
@@ -272,12 +286,17 @@ M.jump_next_cell = navigation.jump_next_cell
 
 function M.setup(opts)
 	opts = opts or {}
+	opts = vim.deepcopy(opts)
 	if opts.execution ~= nil then
-		opts = vim.deepcopy(opts)
 		opts.execution = normalize_execution_opts(opts.execution)
+	end
+	if opts.runtime ~= nil then
+		opts.runtime = normalize_runtime_opts(opts.runtime)
 	end
 	setup_opts = vim.tbl_deep_extend("force", setup_opts, opts)
 	vim.g.marimo_execution_mode = normalize_execution_opts(setup_opts.execution).mode
+	setup_opts.runtime = normalize_runtime_opts(setup_opts.runtime)
+	worker.configure(setup_opts.runtime)
 	commands.setup({
 		group = group,
 		api = M,

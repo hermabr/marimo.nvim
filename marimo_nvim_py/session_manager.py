@@ -13,15 +13,25 @@ from marimo_nvim_py.session import BridgeSession
 
 
 class Worker:
-    def __init__(self, event_sink: Callable[[dict[str, Any]], None] | None = None) -> None:
+    def __init__(
+        self,
+        event_sink: Callable[[dict[str, Any]], None] | None = None,
+        *,
+        kernel_idle_timeout_seconds: float | None = 30 * 60,
+    ) -> None:
         self.sessions: dict[str, BridgeSession] = {}
         self.event_sink = event_sink
         self.pending_cancellations: dict[str, set[int]] = {}
+        self.kernel_idle_timeout_seconds = kernel_idle_timeout_seconds
 
     def _session_for_snapshot(self, snapshot: NotebookSnapshot) -> BridgeSession:
         session = self.sessions.get(snapshot.session_id)
         if session is None:
-            session = BridgeSession(snapshot=snapshot, event_sink=self.event_sink)
+            session = BridgeSession(
+                snapshot=snapshot,
+                event_sink=self.event_sink,
+                kernel_idle_timeout_seconds=self.kernel_idle_timeout_seconds,
+            )
             self.sessions[snapshot.session_id] = session
         else:
             session.update_snapshot(snapshot)
@@ -94,7 +104,7 @@ class Worker:
     def ensure_session(self, params: dict[str, Any]) -> dict[str, Any]:
         snapshot = NotebookSnapshot.from_dict(dict(params["snapshot"]))
         session = self._session_for_snapshot(snapshot)
-        session.ensure_started()
+        session.ensure_started(params.get("_request_id"))
         return {"session_id": snapshot.session_id, "started": True}
 
     def sync_notebook(self, params: dict[str, Any]) -> dict[str, Any]:
